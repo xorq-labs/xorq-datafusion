@@ -1,0 +1,49 @@
+ci:
+  autofix_commit_msg: "style: auto fixes from pre-commit.ci hooks"
+  autofix_prs: false
+  autoupdate_commit_msg: "chore(deps): pre-commit.ci autoupdate"
+  skip:
+    - ruff
+default_stages:
+  - pre-commit
+repos:
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        additional_dependencies:
+          - tomli
+        args: [--ignore-words=.codespell.ignore-words]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.11.2
+    hooks:
+      # Run the linter.
+      - id: ruff
+        args: ["--output-format=full", "--fix", "python"]
+      # Run the formatter.
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: rust-fmt
+        name: Rust fmt
+        description: Run cargo fmt on files included in the commit. rustfmt should be installed before-hand.
+        entry: cargo fmt --all --
+        pass_filenames: true
+        types: [file, rust]
+        language: system
+      - id: rust-clippy
+        name: Rust clippy
+        description: Run cargo clippy on files included in the commit. clippy should be installed before-hand.
+        entry: cargo clippy --all-targets --all-features -- -Dclippy::all -Aclippy::redundant_closure
+        pass_filenames: false
+        types: [file, rust]
+        language: system
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    # uv version.
+    rev: 0.6.11
+    hooks:
+      # Update the uv lockfile
+      - id: uv-lock
+      - id: uv-export
+        args: ["--frozen", "--no-hashes", "--no-emit-project", "--all-groups", "--all-extras", "--output-file=requirements-dev.txt"]
