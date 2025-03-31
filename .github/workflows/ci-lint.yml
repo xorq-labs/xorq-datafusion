@@ -1,0 +1,76 @@
+name: ci-lint
+
+on:
+  push:
+    # Skip the backend suite if all changes are docs
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "**/*.qmd"
+      - "*.md"
+      - "codecov.yml"
+      - ".envrc"
+    branches:
+      - main
+      - master
+    tags:
+      - '*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run codespell
+        uses: codespell-project/actions-codespell@v2
+        with:
+          path: "python src"
+          ignore_words_file: .codespell.ignore-words
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.9"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --only-group dev
+
+      - name: Check requirements-dev.txt
+        run: uv export --frozen --no-hashes --no-emit-project --all-groups --all-extras --output-file=requirements-dev.txt
+
+      # Update output format to enable automatic inline annotations.
+      - name: Run Ruff
+        run: uv run --no-project ruff check --output-format=github python examples docs
+
+      - name: Run fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: -- --check
+
+      - name: Run Clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --all-features -- -D clippy::all -A clippy::redundant_closure
+
+      - name: Verify no uncommitted changes
+        run: |
+          echo "Checking for uncommitted changes in the workspace..."
+          if ! git diff --exit-code --stat; then
+            echo "::error::Error: The linting process must not create uncommitted files"
+            echo "Hint: If you recently updated dependencies or generated files, make sure to commit those changes"
+            echo "Hint: Additionally, check that uv version for pre-commit and ci-lint.yaml match and run pre-commit locally"
+            exit 1
+          fi

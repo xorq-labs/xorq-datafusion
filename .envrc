@@ -1,0 +1,1 @@
+export UV_NO_SYNC=1
