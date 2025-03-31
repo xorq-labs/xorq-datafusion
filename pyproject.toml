@@ -22,6 +22,9 @@ dev = [
     "pytest==8.3.5",
     "maturin>=1.7.4",
     "pip>=24.3.1",
+    "ruff>=0.11.2",
+    "pytest-cov>=6.0.0",
+    "coverage[toml]==7.8.0",
 ]
 
 [tool.maturin]
