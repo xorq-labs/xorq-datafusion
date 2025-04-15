@@ -28,6 +28,7 @@ dev = [
     "ipython>=8.34.0",
 ]
 test = [
+    "numpy>=2.2.4",
     "pandas>=2.2.3",
 ]
 
