@@ -31,3 +31,7 @@ queries = get_queries()
 def test_sql_query(ctx_data, query, collection):
     df = ctx_data.sql(query)
     assert collection(df) is not None
+
+
+def test_tables(ctx_data):
+    assert ctx_data.tables() == {"functional_alltypes", "batting"}
