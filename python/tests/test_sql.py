@@ -7,6 +7,7 @@ def ctx_data(ctx, data_dir):
         "functional_alltypes", str(data_dir / "functional_alltypes.parquet")
     )
     ctx.register_parquet("batting", str(data_dir / "batting.parquet"))
+    ctx.register_parquet("awards_players", str(data_dir / "awards_players.parquet"))
     return ctx
 
 
@@ -55,4 +56,4 @@ def test_sql_query_execute_stream(ctx_data, query, method):
 
 
 def test_tables(ctx_data):
-    assert ctx_data.tables() == {"functional_alltypes", "batting"}
+    assert ctx_data.tables() == {"functional_alltypes", "batting", "awards_players"}
