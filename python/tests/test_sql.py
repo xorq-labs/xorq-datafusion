@@ -1,5 +1,3 @@
-from operator import methodcaller
-
 import pytest
 
 
@@ -25,12 +23,35 @@ queries = get_queries()
 
 
 @pytest.mark.parametrize("query", queries)
-@pytest.mark.parametrize(
-    "collection", [methodcaller(method) for method in ("collect", "execute_stream")]
-)
-def test_sql_query(ctx_data, query, collection):
+def test_sql_query(ctx_data, query):
     df = ctx_data.sql(query)
-    assert collection(df) is not None
+    assert df.collect() is not None
+
+
+def to_pyarrow_batches(batches, schema):
+    import pyarrow as pa
+
+    def make_gen():
+        return (batch.to_pyarrow().cast(schema) for batch in batches)
+
+    return pa.RecordBatchReader.from_batches(schema, make_gen())
+
+
+def to_pandas(batches, schema):
+    batch_reader = to_pyarrow_batches(batches, schema)
+    return batch_reader.read_pandas(timestamp_as_object=True)
+
+
+def to_pyarrow(batches, schema):
+    batch_reader = to_pyarrow_batches(batches, schema)
+    return batch_reader.read_all()
+
+
+@pytest.mark.parametrize("query", queries)
+@pytest.mark.parametrize("method", [to_pyarrow_batches, to_pandas, to_pyarrow])
+def test_sql_query_execute_stream(ctx_data, query, method):
+    df = ctx_data.sql(query)
+    assert method(df.execute_stream(), df.schema()) is not None
 
 
 def test_tables(ctx_data):
