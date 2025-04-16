@@ -183,3 +183,15 @@ def test_register_parquet(ctx, data_dir):
     parquet_df = ctx.table("data")
     parquet_df.show()
     assert parquet_df is not None
+
+
+def test_register_dataframe(ctx, data_dir):
+    parquet_path = data_dir / "data.rownum.parquet"
+    ctx.register_parquet("data", str(parquet_path))
+    parquet_df = ctx.sql("select * from data where addr_state =  'GA' limit 20")
+
+    ctx.register_dataframe("data_v2", parquet_df)
+
+    assert ctx.table_exist("data_v2") is True
+    df = ctx.table("data_v2").to_pandas()
+    assert len(df) == 20
