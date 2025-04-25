@@ -27,6 +27,11 @@ dev = [
     "coverage[toml]==7.8.0",
     "ipython>=8.34.0",
 ]
+test = [
+    "ibis-framework[duckdb]>=10.4.0",
+    "numpy>=2.2.4",
+    "pandas>=2.2.3",
+]
 
 [tool.maturin]
 module-name = "xorq_datafusion._internal"
