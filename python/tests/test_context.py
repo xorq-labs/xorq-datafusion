@@ -195,3 +195,24 @@ def test_register_dataframe(ctx, data_dir):
     assert ctx.table_exist("data_v2") is True
     df = ctx.table("data_v2").to_pandas()
     assert len(df) == 20
+
+
+def test_get_object_metadata_local_filesystem(ctx, data_dir):
+    url = data_dir / "data.rownum.parquet"
+    metadata = ctx.get_object_metadata(str(url.resolve()), "parquet")
+
+    assert isinstance(metadata, dict)
+
+
+def test_get_object_metadata_https(ctx):
+    from urllib.request import Request, urlopen
+
+    url = "https://raw.githubusercontent.com/ibis-project/testing-data/refs/heads/master/csv/astronauts.csv"
+
+    metadata = ctx.get_object_metadata(url, "csv")
+    assert isinstance(metadata, dict)
+
+    request = Request(url, method="GET")
+    with urlopen(request) as response:
+        etag = response.headers.get("ETag")
+        assert etag == metadata["e_tag"]
