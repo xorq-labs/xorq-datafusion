@@ -4,10 +4,10 @@ import pytest
 @pytest.fixture(scope="function")
 def ctx_data(ctx, data_dir):
     ctx.register_parquet(
-        "functional_alltypes", str(data_dir / "functional_alltypes.parquet")
+        "functional_alltypes", [str(data_dir / "functional_alltypes.parquet")]
     )
-    ctx.register_parquet("batting", str(data_dir / "batting.parquet"))
-    ctx.register_parquet("awards_players", str(data_dir / "awards_players.parquet"))
+    ctx.register_parquet("batting", [str(data_dir / "batting.parquet")])
+    ctx.register_parquet("awards_players", [str(data_dir / "awards_players.parquet")])
     return ctx
 
 

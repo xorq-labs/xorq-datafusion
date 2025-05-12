@@ -1,6 +1,6 @@
 def test_register_explain_select(ctx, data_dir):
     parquet_path = data_dir / "data.rownum.parquet"
-    ctx.register_parquet("data", str(parquet_path))
+    ctx.register_parquet("data", [str(parquet_path)])
     actual = (
         ctx.sql("explain select * from data")
         .to_pandas()
