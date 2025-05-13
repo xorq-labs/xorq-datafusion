@@ -2,7 +2,6 @@ from abc import ABCMeta, abstractmethod
 from typing import List
 
 import pyarrow as pa
-
 from xorq_datafusion._internal import (
     AggregateUDF,
     ContextProvider,
@@ -19,6 +18,11 @@ from xorq_datafusion._internal import (
     TableProvider,
     WindowUDF,
 )
+
+try:
+    import importlib.metadata as importlib_metadata
+except ModuleNotFoundError:
+    import importlib_metadata
 
 
 __all__ = [
@@ -91,12 +95,12 @@ class WindowEvaluator(metaclass=ABCMeta):
         pass
 
     def evaluate(
-            self, values: list[pa.Array], eval_range: tuple[int, int]
+        self, values: list[pa.Array], eval_range: tuple[int, int]
     ) -> pa.Scalar:
         pass
 
     def evaluate_all_with_rank(
-            self, num_rows: int, ranks_in_partition: list[tuple[int, int]]
+        self, num_rows: int, ranks_in_partition: list[tuple[int, int]]
     ) -> pa.Array:
         pass
 
@@ -146,11 +150,11 @@ def udaf(accum, input_type, return_type, state_type, volatility, name=None):
 
 
 def udwf(
-        func: WindowEvaluator,
-        input_types: pa.DataType | list[pa.DataType],
-        return_type: pa.DataType,
-        volatility: str,
-        name: str | None = None,
+    func: WindowEvaluator,
+    input_types: pa.DataType | list[pa.DataType],
+    return_type: pa.DataType,
+    volatility: str,
+    name: str | None = None,
 ) -> WindowUDF:
     """Create a new User-Defined Window Function.
 
@@ -172,3 +176,6 @@ def udwf(
         input_types = [input_types]
 
     return WindowUDF(name, func, input_types, return_type, str(volatility))
+
+
+__version__ = importlib_metadata.version(__package__)
