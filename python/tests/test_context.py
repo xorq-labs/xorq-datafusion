@@ -53,7 +53,7 @@ def test_register_record_batch_reader(ctx):
 
 
 def test_register_table(ctx, data_dir):
-    ctx.register_csv("iris", str(data_dir / "iris.csv"))
+    ctx.register_csv("iris", [str(data_dir / "iris.csv")])
 
     default = ctx.catalog()
     public = default.database("public")
@@ -66,7 +66,7 @@ def test_register_table(ctx, data_dir):
 
 
 def test_deregister_table(ctx, data_dir):
-    ctx.register_csv("iris", str(data_dir / "iris.csv"))
+    ctx.register_csv("iris", [str(data_dir / "iris.csv")])
 
     default = ctx.catalog()
     public = default.database("public")
@@ -173,13 +173,13 @@ def test_table_not_found(ctx):
 
 
 def test_register_csv(ctx, data_dir):
-    ctx.register_csv("iris", str(data_dir / "iris.csv"))
+    ctx.register_csv("iris", [str(data_dir / "iris.csv")])
     assert ctx.sql("select * from iris") is not None
 
 
 def test_register_parquet(ctx, data_dir):
     parquet_path = data_dir / "data.rownum.parquet"
-    ctx.register_parquet("data", str(parquet_path))
+    ctx.register_parquet("data", [str(parquet_path)])
     parquet_df = ctx.table("data")
     parquet_df.show()
     assert parquet_df is not None
@@ -187,7 +187,7 @@ def test_register_parquet(ctx, data_dir):
 
 def test_register_dataframe(ctx, data_dir):
     parquet_path = data_dir / "data.rownum.parquet"
-    ctx.register_parquet("data", str(parquet_path))
+    ctx.register_parquet("data", [str(parquet_path)])
     parquet_df = ctx.sql("select * from data where addr_state =  'GA' limit 20")
 
     ctx.register_dataframe("data_v2", parquet_df)
