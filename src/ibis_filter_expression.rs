@@ -43,7 +43,7 @@ impl TryFrom<&Expr> for IbisFilterExpression {
 
     fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
         Python::with_gil(|py| {
-            let ibis = Python::import(py, "ibis")?;
+            let ibis = Python::import(py, "xorq.vendor.ibis")?;
             let op_module = Python::import(py, "operator")?;
             let deferred = ibis.getattr("_")?;
 
