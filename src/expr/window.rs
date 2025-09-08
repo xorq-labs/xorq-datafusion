@@ -15,21 +15,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use super::py_expr_list;
 use crate::common::df_schema::PyDFSchema;
 use crate::errors::py_type_err;
 use crate::expr::logical_node::LogicalNode;
 use crate::expr::PyExpr;
 use crate::sql::logical::PyLogicalPlan;
 use datafusion::logical_expr::expr::{WindowFunction, WindowFunctionParams};
-use datafusion_common::{DataFusionError, ScalarValue};
+use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Window, WindowFrame, WindowFrameBound, WindowFrameUnits};
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use std::fmt::{self, Display, Formatter};
 
-use super::py_expr_list;
-
-use crate::errors::py_datafusion_err;
 use crate::expr::sort_expr::{py_sort_expr_list, PySortExpr};
 
 #[pyclass(name = "Window", module = "datafusion.expr", subclass)]
@@ -186,10 +185,7 @@ impl PyWindowFrame {
             "range" => WindowFrameUnits::Range,
             "groups" => WindowFrameUnits::Groups,
             _ => {
-                return Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                    "{:?}",
-                    units,
-                ))));
+                return Err(PyNotImplementedError::new_err(format!("{:?}", units,)));
             }
         };
         let start_bound = match start_bound {
@@ -200,10 +196,7 @@ impl PyWindowFrame {
                 WindowFrameUnits::Range => WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Rows => WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Groups => {
-                    return Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                        "{:?}",
-                        units,
-                    ))));
+                    return Err(PyNotImplementedError::new_err(format!("{:?}", units,)));
                 }
             },
         };
@@ -213,10 +206,7 @@ impl PyWindowFrame {
                 WindowFrameUnits::Rows => WindowFrameBound::Following(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Range => WindowFrameBound::Following(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Groups => {
-                    return Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                        "{:?}",
-                        units,
-                    ))));
+                    return Err(PyNotImplementedError::new_err(format!("{:?}", units,)));
                 }
             },
         };
@@ -270,14 +260,13 @@ impl PyWindowFrameBound {
                 ScalarValue::Int64(v) => Ok(v.map(|n| n as u64)),
                 ScalarValue::Utf8(Some(s)) => match s.parse::<u64>() {
                     Ok(s) => Ok(Some(s)),
-                    Err(_e) => Err(DataFusionError::Plan(format!(
+                    Err(_e) => Err(PyValueError::new_err(format!(
                         "Unable to parse u64 from Utf8 value '{s}'"
-                    ))
-                    .into()),
+                    ))),
                 },
-                ref x => {
-                    Err(DataFusionError::Plan(format!("Unexpected window frame bound: {x}")).into())
-                }
+                ref x => Err(PyValueError::new_err(format!(
+                    "Unexpected window frame bound: {x}"
+                ))),
             },
             WindowFrameBound::CurrentRow => Ok(None),
         }

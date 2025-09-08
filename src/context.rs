@@ -1,7 +1,7 @@
 use crate::catalog::{PyCatalog, PyTable};
 use crate::dataframe::PyDataFrame;
 use crate::dataset::Dataset;
-use crate::errors::DataFusionError;
+use crate::errors::from_datafusion_error;
 use crate::expr::sort_expr::PySortExpr;
 use crate::functions::greatest::GreatestFunc;
 use crate::functions::hash_int::HashIntFunc;
@@ -234,14 +234,14 @@ impl PySessionContext {
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.
     fn sql(&mut self, query: &str, py: Python) -> PyResult<PyDataFrame> {
         let result = self.ctx.sql(query);
-        let df = wait_for_future(py, result)?;
+        let df = wait_for_future(py, result).map_err(from_datafusion_error)?;
         Ok(PyDataFrame::new(df))
     }
 
     fn deregister_table(&mut self, name: &str) -> PyResult<()> {
         self.ctx
             .deregister_table(name)
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
         Ok(())
     }
 
@@ -385,7 +385,7 @@ impl PySessionContext {
         let table = MemTable::try_new(schema, partitions.0)?;
         self.ctx
             .register_table(name, Arc::new(table))
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
         Ok(())
     }
 
@@ -426,7 +426,7 @@ impl PySessionContext {
         let table = PyRecordBatchProvider::new(reader, ordering.clone());
         self.ctx
             .register_table(name, Arc::new(table))
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
 
         Ok(())
     }
@@ -441,7 +441,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
 
         Ok(())
     }
@@ -457,7 +457,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
 
         Ok(())
     }
@@ -467,7 +467,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
 
         Ok(())
     }
@@ -475,7 +475,7 @@ impl PySessionContext {
     pub fn register_table(&mut self, name: &str, table: &PyTable) -> PyResult<()> {
         self.ctx
             .register_table(name, table.table())
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
         Ok(())
     }
 
@@ -484,7 +484,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(DataFusionError::from)?;
+            .map_err(from_datafusion_error)?;
 
         Ok(())
     }
@@ -502,7 +502,7 @@ impl PySessionContext {
     }
 
     fn table(&self, name: &str, py: Python) -> PyResult<PyDataFrame> {
-        let x = wait_for_future(py, self.ctx.table(name)).map_err(DataFusionError::from)?;
+        let x = wait_for_future(py, self.ctx.table(name)).map_err(from_datafusion_error)?;
         Ok(PyDataFrame::new(x))
     }
 
@@ -715,12 +715,12 @@ impl From<PySessionContext> for SessionContext {
 
 fn convert_table_partition_cols(
     table_partition_cols: Vec<(String, String)>,
-) -> Result<Vec<(String, DataType)>, DataFusionError> {
+) -> Result<Vec<(String, DataType)>, PyErr> {
     table_partition_cols
         .into_iter()
         .map(|(name, ty)| match ty.as_str() {
             "string" => Ok((name, DataType::Utf8)),
-            _ => Err(DataFusionError::Common(format!(
+            _ => Err(PyValueError::new_err(format!(
                 "Unsupported data type '{ty}' for partition column"
             ))),
         })

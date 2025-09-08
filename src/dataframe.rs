@@ -7,12 +7,13 @@ use datafusion::dataframe::{DataFrame, DataFrameWriteOptions};
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::prelude::*;
 use datafusion_common::config::TableParquetOptions;
+use futures::TryFutureExt;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use tokio::task::JoinHandle;
 
-use crate::errors::{py_datafusion_err, DataFusionError};
+use crate::errors::{from_datafusion_error, py_datafusion_err};
 use crate::physical_plan::PyExecutionPlan;
 use crate::record_batch::PyRecordBatchStream;
 use crate::utils::{get_tokio_runtime, wait_for_completion, wait_for_future};
@@ -51,14 +52,15 @@ impl PyDataFrame {
             // df[[col1, col2, col3]]
             self.select_columns(keys)
         } else {
-            let message = "DataFrame can only be indexed by string index or indices";
-            Err(PyTypeError::new_err(message))
+            Err(PyTypeError::new_err(
+                "DataFrame can only be indexed by string index or indices",
+            ))
         }
     }
 
     fn __repr__(&self, py: Python) -> PyResult<String> {
         let df = self.df.as_ref().clone().limit(0, Some(10))?;
-        let batches = wait_for_future(py, df.collect())?;
+        let batches = wait_for_future(py, df.collect()).map_err(from_datafusion_error)?;
         let batches_as_string = pretty::pretty_format_batches(&batches);
         match batches_as_string {
             Ok(batch) => Ok(format!("DataFrame()\n{batch}")),
@@ -69,7 +71,7 @@ impl PyDataFrame {
     /// Calculate summary statistics for a DataFrame
     fn describe(&self, py: Python) -> PyResult<Self> {
         let df = self.df.as_ref().clone();
-        let stat_df = wait_for_future(py, df.describe())?;
+        let stat_df = wait_for_future(py, df.describe()).map_err(from_datafusion_error)?;
         Ok(Self::new(stat_df))
     }
 
@@ -106,7 +108,8 @@ impl PyDataFrame {
     /// Unless some order is specified in the plan, there is no
     /// guarantee of the order of the result.
     fn collect(&self, py: Python) -> PyResult<Vec<PyObject>> {
-        let batches = wait_for_future(py, self.df.as_ref().clone().collect())?;
+        let batches = wait_for_future(py, self.df.as_ref().clone().collect())
+            .map_err(from_datafusion_error)?;
         // cannot use PyResult<Vec<RecordBatch>> return type due to
         // https://github.com/PyO3/pyo3/issues/1813
         batches.into_iter().map(|rb| rb.to_pyarrow(py)).collect()
@@ -114,14 +117,16 @@ impl PyDataFrame {
 
     /// Cache DataFrame.
     fn cache(&self, py: Python) -> PyResult<Self> {
-        let df = wait_for_future(py, self.df.as_ref().clone().cache())?;
+        let df =
+            wait_for_future(py, self.df.as_ref().clone().cache()).map_err(from_datafusion_error)?;
         Ok(Self::new(df))
     }
 
-    /// Executes this DataFrame and collects all results into a vector of vector of RecordBatch
+    /// Executes this DataFrame and collects all results into a vector of vectors of RecordBatch
     /// maintaining the input partitioning.
     fn collect_partitioned(&self, py: Python) -> PyResult<Vec<Vec<PyObject>>> {
-        let batches = wait_for_future(py, self.df.as_ref().clone().collect_partitioned())?;
+        let batches = wait_for_future(py, self.df.as_ref().clone().collect_partitioned())
+            .map_err(from_datafusion_error)?;
 
         batches
             .into_iter()
@@ -156,10 +161,9 @@ impl PyDataFrame {
             "semi" => JoinType::LeftSemi,
             "anti" => JoinType::LeftAnti,
             how => {
-                return Err(DataFusionError::Common(format!(
+                return Err(PyValueError::new_err(format!(
                     "The join type {how} does not exist or is not implemented"
-                ))
-                .into());
+                )));
             }
         };
 
@@ -252,7 +256,8 @@ impl PyDataFrame {
                 .as_ref()
                 .clone()
                 .write_csv(path, DataFrameWriteOptions::new(), None),
-        )?;
+        )
+        .map_err(from_datafusion_error)?;
         Ok(())
     }
 
@@ -277,7 +282,8 @@ impl PyDataFrame {
                 DataFrameWriteOptions::new(),
                 Option::from(parquet_options),
             ),
-        )?;
+        )
+        .map_err(from_datafusion_error)?;
         Ok(())
     }
 
@@ -289,7 +295,8 @@ impl PyDataFrame {
                 .as_ref()
                 .clone()
                 .write_json(path, DataFrameWriteOptions::new(), None),
-        )?;
+        )
+        .map_err(from_datafusion_error)?;
         Ok(())
     }
 
@@ -317,8 +324,8 @@ impl PyDataFrame {
         let rt = &get_tokio_runtime(py).0;
         let df = self.df.as_ref().clone();
 
-        let fut: JoinHandle<datafusion_common::Result<SendableRecordBatchStream>> =
-            rt.spawn(async move { df.execute_stream().await });
+        let fut: JoinHandle<PyResult<SendableRecordBatchStream>> =
+            rt.spawn(async move { df.execute_stream().map_err(from_datafusion_error).await });
         let stream = wait_for_completion(py, fut).map_err(py_datafusion_err)?;
         Ok(PyRecordBatchStream::new(stream?))
     }
@@ -336,9 +343,7 @@ impl PyDataFrame {
                 .into_iter()
                 .map(|batch_stream| PyRecordBatchStream::new(batch_stream))
                 .collect()),
-            _ => Err(PyValueError::new_err(
-                "Unable to execute stream partitioned",
-            )),
+            Err(e) => Err(from_datafusion_error(e)),
         }
     }
 
@@ -398,7 +403,8 @@ impl PyDataFrame {
 
     /// Get the execution plan for this `DataFrame`
     fn execution_plan(&self, py: Python) -> PyResult<PyExecutionPlan> {
-        let plan = wait_for_future(py, self.df.as_ref().clone().create_physical_plan())?;
+        let plan = wait_for_future(py, self.df.as_ref().clone().create_physical_plan())
+            .map_err(from_datafusion_error)?;
         Ok(plan.into())
     }
 }
