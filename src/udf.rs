@@ -1,6 +1,6 @@
 use pyo3::{prelude::*, types::PyTuple};
 
-use crate::errors::to_datafusion_err;
+use crate::errors::to_external_err;
 use crate::utils::{make_scalar_function, parse_volatility};
 use datafusion::arrow::array::{make_array, Array, ArrayData, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
@@ -22,10 +22,10 @@ fn to_rust_function(func: PyObject) -> ScalarFunctionImplementation {
                     .iter()
                     .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
                     .collect::<Vec<_>>();
-                let py_args = PyTuple::new(py, py_args).map_err(to_datafusion_err)?;
+                let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
                 // 2. call function
-                let value = func.call(py, py_args, None).map_err(to_datafusion_err)?;
+                let value = func.call(py, py_args, None).map_err(to_external_err)?;
 
                 // 3. cast to arrow::array::Array
                 let array_data = ArrayData::from_pyarrow_bound(value.bind(py)).unwrap();

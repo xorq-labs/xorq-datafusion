@@ -15,8 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::errors::{to_datafusion_err, DataFusionError};
+use crate::errors::to_external_err;
 use datafusion_common::ScalarValue;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 #[pyclass(name = "Literal", module = "datafusion.expr", subclass)]
@@ -148,7 +149,7 @@ impl PyLiteral {
         Ok(self
             .clone()
             .into_pyobject(py)
-            .map_err(to_datafusion_err)?
+            .map_err(to_external_err)?
             .into_any()
             .unbind())
     }
@@ -159,5 +160,5 @@ impl PyLiteral {
 }
 
 fn unexpected_literal_value(value: &ScalarValue) -> PyErr {
-    DataFusionError::Common(format!("getValue<T>() - Unexpected value: {value}")).into()
+    PyValueError::new_err(format!("getValue<T>() - Unexpected value: {value}"))
 }

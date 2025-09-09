@@ -27,12 +27,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::common::data_type::PyScalarValue;
-use crate::errors::to_datafusion_err;
+use crate::errors::to_external_err;
 use crate::expr::PyExpr;
 use crate::utils::parse_volatility;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType, ToPyArrow};
-use datafusion::error::{DataFusionError, Result};
+use datafusion::error::Result;
 use datafusion::logical_expr::{
     PartitionEvaluator, PartitionEvaluatorFactory, Signature, Volatility, WindowUDF, WindowUDFImpl,
 };
@@ -53,7 +53,7 @@ impl RustPartitionEvaluator {
 impl PartitionEvaluator for RustPartitionEvaluator {
     fn memoize(&mut self, _state: &mut WindowAggState) -> Result<()> {
         Python::with_gil(|py| self.evaluator.bind(py).call_method0("memoize").map(|_| ()))
-            .map_err(|e| DataFusionError::Execution(format!("{e}")))
+            .map_err(to_external_err)
     }
 
     fn get_range(&self, idx: usize, n_rows: usize) -> Result<Range<usize>> {
@@ -79,7 +79,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                     Ok(Range { start, end })
                 })
         })
-        .map_err(|e| DataFusionError::Execution(format!("{e}")))
+        .map_err(to_external_err)
     }
 
     fn is_causal(&self) -> bool {
@@ -111,7 +111,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                     make_array(array_data)
                 })
         })
-        .map_err(to_datafusion_err)
+        .map_err(to_external_err)
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
@@ -131,7 +131,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                 .and_then(|v| v.extract::<PyScalarValue>())
                 .map(|v| v.0)
         })
-        .map_err(to_datafusion_err)
+        .map_err(to_external_err)
     }
 
     fn evaluate_all_with_rank(
@@ -162,7 +162,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                     make_array(array_data)
                 })
         })
-        .map_err(to_datafusion_err)
+        .map_err(to_external_err)
     }
 
     fn supports_bounded_execution(&self) -> bool {

@@ -1,10 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use pyo3::exceptions::PyKeyError;
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::errors::DataFusionError;
 use crate::utils::wait_for_future;
 use datafusion::{
     arrow::pyarrow::ToPyArrow,
@@ -83,7 +82,7 @@ impl PyDatabase {
         if let Ok(Some(table)) = wait_for_future(py, self.database.table(name)) {
             Ok(PyTable::new(table))
         } else {
-            Err(DataFusionError::Common(format!("Table not found: {name}")).into())
+            Err(PyValueError::new_err(format!("Table not found: {name}")))
         }
     }
 
