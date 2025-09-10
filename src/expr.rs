@@ -31,11 +31,11 @@ use datafusion_expr::{
     utils::exprlist_to_fields,
     Between, BinaryExpr, Case, Cast, Expr, Like, LogicalPlan, Operator, TryCast,
 };
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use sort_expr::PySortExpr;
 
 use crate::common::data_type::{DataTypeMap, RexType};
-use crate::errors::{py_runtime_err, PyDataFusionError};
+use crate::errors::PyDataFusionError;
 use crate::expr::aggregate_expr::PyAggregateFunction;
 use crate::expr::binary_expr::PyBinaryExpr;
 use crate::expr::case::PyCase;
@@ -158,7 +158,7 @@ impl PyExpr {
             Expr::AggregateFunction(expr) => {
                 Ok(PyAggregateFunction::from(expr.clone()).into_bound_py_any(py)?)
             }
-            other => Err(py_runtime_err(format!(
+            other => Err(PyValueError::new_err(format!(
                 "Cannot convert this Expr to a Python object: {:?}",
                 other
             ))),
@@ -433,7 +433,7 @@ impl PyExpr {
             | Expr::Wildcard { .. }
             | Expr::ScalarSubquery(..)
             | Expr::Placeholder { .. }
-            | Expr::Exists { .. } => Err(py_runtime_err(format!(
+            | Expr::Exists { .. } => Err(PyValueError::new_err(format!(
                 "Unimplemented Expr type: {}",
                 self.expr
             ))),
@@ -492,7 +492,7 @@ impl PyExpr {
     }
 
     pub fn column_name(&self, plan: PyLogicalPlan) -> PyResult<String> {
-        self._column_name(&plan.plan()).map_err(py_runtime_err)
+        self._column_name(&plan.plan()).map_err(|e| e.into())
     }
 }
 
