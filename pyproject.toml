@@ -12,7 +12,7 @@ classifiers = [
 ]
 dynamic = ["version"]
 dependencies = [
-    "pyarrow>=19.0.1",
+    "pyarrow==20.0.0",
 ]
 
 [dependency-groups]
