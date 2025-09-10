@@ -1076,7 +1076,7 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pyarrow", marker = "python_full_version >= '3.10' and python_full_version < '4.0'", specifier = ">=18.0.0,<21" }]
+requires-dist = [{ name = "pyarrow", marker = "python_full_version >= '3.10' and python_full_version < '4.0'", specifier = ">=18.0.0,<22" }]
 
 [package.metadata.requires-dev]
 dev = [
