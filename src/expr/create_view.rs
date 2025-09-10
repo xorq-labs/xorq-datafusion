@@ -18,11 +18,12 @@
 use std::fmt::{self, Display, Formatter};
 
 use datafusion_expr::{CreateView, DdlStatement, LogicalPlan};
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 
 use super::logical_node::LogicalNode;
-use crate::{errors::py_type_err, sql::logical::PyLogicalPlan};
+use crate::sql::logical::PyLogicalPlan;
 
 #[pyclass(name = "CreateView", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
@@ -99,7 +100,7 @@ impl TryFrom<LogicalPlan> for PyCreateView {
     fn try_from(logical_plan: LogicalPlan) -> Result<Self, Self::Error> {
         match logical_plan {
             LogicalPlan::Ddl(DdlStatement::CreateView(create)) => Ok(PyCreateView { create }),
-            _ => Err(py_type_err("unexpected plan")),
+            _ => Err(PyTypeError::new_err("unexpected plan")),
         }
     }
 }
