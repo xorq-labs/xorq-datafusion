@@ -1,10 +1,10 @@
 use pyo3::prelude::*;
 
-use crate::errors::DataFusionError;
 use crate::pyarrow_filter_expression::extract_scalar_list;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::InList;
 use datafusion_expr::{Between, BinaryExpr, Expr, Operator};
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -13,7 +13,7 @@ pub(crate) struct IbisFilterExpression(PyObject);
 fn operator_to_py<'py>(
     operator: &Operator,
     op: &Bound<'py, PyModule>,
-) -> Result<Bound<'py, PyAny>, DataFusionError> {
+) -> Result<Bound<'py, PyAny>, PyErr> {
     let py_op: Bound<'py, PyAny> = match operator {
         Operator::Eq => op.getattr("eq")?,
         Operator::NotEq => op.getattr("ne")?,
@@ -24,7 +24,7 @@ fn operator_to_py<'py>(
         Operator::And => op.getattr("and_")?,
         Operator::Or => op.getattr("or_")?,
         _ => {
-            return Err(DataFusionError::Common(format!(
+            return Err(PyNotImplementedError::new_err(format!(
                 "Unsupported operator {operator:?}"
             )))
         }
@@ -39,7 +39,7 @@ impl IbisFilterExpression {
 }
 
 impl TryFrom<&Expr> for IbisFilterExpression {
-    type Error = DataFusionError;
+    type Error = PyErr;
 
     fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
         Python::with_gil(|py| {
@@ -47,7 +47,7 @@ impl TryFrom<&Expr> for IbisFilterExpression {
             let op_module = Python::import(py, "operator")?;
             let deferred = ibis.getattr("_")?;
 
-            let ibis_expr: Result<Bound<'_, PyAny>, DataFusionError> = match expr {
+            let ibis_expr: Result<Bound<'_, PyAny>, PyErr> = match expr {
                 Expr::Column(Column { name, .. }) => Ok(deferred.getattr(name.as_str())?),
                 Expr::Literal(v) => match v {
                     ScalarValue::Boolean(Some(b)) => Ok(ibis.getattr("literal")?.call1((*b,))?),
@@ -62,7 +62,7 @@ impl TryFrom<&Expr> for IbisFilterExpression {
                     ScalarValue::Float32(Some(f)) => Ok(ibis.getattr("literal")?.call1((*f,))?),
                     ScalarValue::Float64(Some(f)) => Ok(ibis.getattr("literal")?.call1((*f,))?),
                     ScalarValue::Utf8(Some(s)) => Ok(ibis.getattr("literal")?.call1((s,))?),
-                    _ => Err(DataFusionError::Common(format!(
+                    _ => Err(PyValueError::new_err(format!(
                         "Ibis can't handle ScalarValue: {v:?}"
                     ))),
                 },
@@ -118,7 +118,7 @@ impl TryFrom<&Expr> for IbisFilterExpression {
                     let invert = op_module.getattr("invert")?;
                     Ok(if *negated { invert.call1((ret,))? } else { ret })
                 }
-                _ => Err(DataFusionError::Common(format!(
+                _ => Err(PyNotImplementedError::new_err(format!(
                     "Unsupported Datafusion expression {expr:?}"
                 ))),
             };

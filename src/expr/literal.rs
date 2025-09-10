@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::errors::to_external_err;
+use crate::errors::PyDataFusionError;
 use datafusion_common::ScalarValue;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -149,7 +149,7 @@ impl PyLiteral {
         Ok(self
             .clone()
             .into_pyobject(py)
-            .map_err(to_external_err)?
+            .map_err(PyDataFusionError::from)?
             .into_any()
             .unbind())
     }

@@ -1,7 +1,7 @@
 use crate::catalog::{PyCatalog, PyTable};
 use crate::dataframe::PyDataFrame;
 use crate::dataset::Dataset;
-use crate::errors::from_datafusion_error;
+use crate::errors::PyDataFusionError;
 use crate::expr::sort_expr::PySortExpr;
 use crate::functions::greatest::GreatestFunc;
 use crate::functions::hash_int::HashIntFunc;
@@ -234,14 +234,12 @@ impl PySessionContext {
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.
     fn sql(&mut self, query: &str, py: Python) -> PyResult<PyDataFrame> {
         let result = self.ctx.sql(query);
-        let df = wait_for_future(py, result).map_err(from_datafusion_error)?;
+        let df = wait_for_future(py, result).map_err(PyDataFusionError)?;
         Ok(PyDataFrame::new(df))
     }
 
     fn deregister_table(&mut self, name: &str) -> PyResult<()> {
-        self.ctx
-            .deregister_table(name)
-            .map_err(from_datafusion_error)?;
+        self.ctx.deregister_table(name).map_err(PyDataFusionError)?;
         Ok(())
     }
 
@@ -385,7 +383,7 @@ impl PySessionContext {
         let table = MemTable::try_new(schema, partitions.0)?;
         self.ctx
             .register_table(name, Arc::new(table))
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
         Ok(())
     }
 
@@ -426,7 +424,7 @@ impl PySessionContext {
         let table = PyRecordBatchProvider::new(reader, ordering.clone());
         self.ctx
             .register_table(name, Arc::new(table))
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
 
         Ok(())
     }
@@ -441,7 +439,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
 
         Ok(())
     }
@@ -457,7 +455,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
 
         Ok(())
     }
@@ -467,7 +465,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
 
         Ok(())
     }
@@ -475,7 +473,7 @@ impl PySessionContext {
     pub fn register_table(&mut self, name: &str, table: &PyTable) -> PyResult<()> {
         self.ctx
             .register_table(name, table.table())
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
         Ok(())
     }
 
@@ -484,7 +482,7 @@ impl PySessionContext {
 
         self.ctx
             .register_table(name, table)
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
 
         Ok(())
     }
@@ -502,7 +500,7 @@ impl PySessionContext {
     }
 
     fn table(&self, name: &str, py: Python) -> PyResult<PyDataFrame> {
-        let x = wait_for_future(py, self.ctx.table(name)).map_err(from_datafusion_error)?;
+        let x = wait_for_future(py, self.ctx.table(name)).map_err(PyDataFusionError)?;
         Ok(PyDataFrame::new(x))
     }
 

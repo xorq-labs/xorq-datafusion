@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::errors::to_external_err;
+use crate::errors::PyDataFusionError;
 use crate::sql::logical::PyLogicalPlan;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::DataFusionError;
@@ -76,7 +76,7 @@ impl OptimizerRule for PyOptimizerRule {
                 .rule
                 .bind(py)
                 .call_method1("try_optimize", (py_plan,))
-                .map_err(to_external_err)?;
+                .map_err(PyDataFusionError::from)?;
             Ok(Transformed::new_transformed(
                 py_plan
                     .extract::<PyLogicalPlan>()

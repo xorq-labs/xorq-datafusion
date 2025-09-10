@@ -34,7 +34,7 @@ use datafusion_expr::{
 use sort_expr::PySortExpr;
 
 use crate::common::data_type::{DataTypeMap, RexType};
-use crate::errors::{py_runtime_err, py_type_err, DataFusionError};
+use crate::errors::{py_runtime_err, py_type_err, PyDataFusionError};
 use crate::expr::aggregate_expr::PyAggregateFunction;
 use crate::expr::binary_expr::PyBinaryExpr;
 use crate::expr::case::PyCase;
@@ -496,7 +496,7 @@ impl PyExpr {
 }
 
 impl PyExpr {
-    pub fn _column_name(&self, plan: &LogicalPlan) -> Result<String, DataFusionError> {
+    pub fn _column_name(&self, plan: &LogicalPlan) -> Result<String, PyDataFusionError> {
         let field = Self::expr_to_field(&self.expr, plan)?;
         Ok(field.name().to_owned())
     }
@@ -505,7 +505,7 @@ impl PyExpr {
     pub fn expr_to_field(
         expr: &Expr,
         input_plan: &LogicalPlan,
-    ) -> Result<Arc<Field>, DataFusionError> {
+    ) -> Result<Arc<Field>, PyDataFusionError> {
         match expr {
             #[allow(deprecated)]
             Expr::Wildcard { .. } => {
