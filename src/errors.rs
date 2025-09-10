@@ -47,7 +47,3 @@ impl Display for PyDataFusionError {
 }
 
 impl Error for PyDataFusionError {}
-
-pub fn py_datafusion_err(e: impl Debug) -> PyErr {
-    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{e:?}"))
-}

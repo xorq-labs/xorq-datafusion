@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use tokio::task::JoinHandle;
 
-use crate::errors::{py_datafusion_err, PyDataFusionError};
+use crate::errors::PyDataFusionError;
 use crate::physical_plan::PyExecutionPlan;
 use crate::record_batch::PyRecordBatchStream;
 use crate::utils::{get_tokio_runtime, wait_for_completion, wait_for_future};
@@ -329,7 +329,8 @@ impl PyDataFrame {
                 .map_err(|e| PyDataFusionError(e).into())
                 .await
         });
-        let stream = wait_for_completion(py, fut).map_err(py_datafusion_err)?;
+        let stream =
+            wait_for_completion(py, fut).map_err(|e| PyValueError::new_err(format!("{e}")))?;
         Ok(PyRecordBatchStream::new(stream?))
     }
 
@@ -339,7 +340,7 @@ impl PyDataFrame {
         let df = self.df.as_ref().clone();
         let fut: JoinHandle<datafusion_common::Result<Vec<SendableRecordBatchStream>>> =
             rt.spawn(async move { df.execute_stream_partitioned().await });
-        let stream = wait_for_future(py, fut).map_err(py_datafusion_err)?;
+        let stream = wait_for_future(py, fut).map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
         match stream {
             Ok(batches) => Ok(batches
