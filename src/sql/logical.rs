@@ -17,7 +17,6 @@
 
 use std::sync::Arc;
 
-use crate::errors::py_unsupported_variant_err;
 use crate::expr::aggregate::PyAggregate;
 use crate::expr::analyze::PyAnalyze;
 use crate::expr::distinct::PyDistinct;
@@ -34,6 +33,7 @@ use crate::expr::subquery_alias::PySubqueryAlias;
 use crate::expr::table_scan::PyTableScan;
 use crate::expr::window::PyWindow;
 use datafusion_expr::LogicalPlan;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::expr::logical_node::LogicalNode;
@@ -77,7 +77,7 @@ impl PyLogicalPlan {
             LogicalPlan::Subquery(plan) => PySubquery::from(plan.clone()).to_variant(py),
             LogicalPlan::SubqueryAlias(plan) => PySubqueryAlias::from(plan.clone()).to_variant(py),
             LogicalPlan::Window(plan) => PyWindow::from(plan.clone()).to_variant(py),
-            other => Err(py_unsupported_variant_err(format!(
+            other => Err(PyValueError::new_err(format!(
                 "Cannot convert this plan to a LogicalNode: {:?}",
                 other
             ))),
