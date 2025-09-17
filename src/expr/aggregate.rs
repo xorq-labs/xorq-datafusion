@@ -17,13 +17,13 @@
 
 use super::logical_node::LogicalNode;
 use crate::common::df_schema::PyDFSchema;
-use crate::errors::py_type_err;
 use crate::expr::PyExpr;
 use crate::sql::logical::PyLogicalPlan;
 use datafusion::logical_expr::expr::{AggregateFunction, AggregateFunctionParams, Alias};
 use datafusion_common::DataFusionError;
 use datafusion_expr::logical_plan::Aggregate;
 use datafusion_expr::Expr;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use std::fmt::{self, Display, Formatter};
@@ -132,8 +132,8 @@ impl PyAggregate {
                 params: AggregateFunctionParams { args, .. },
                 ..
             }) => Ok(args.iter().map(|e| PyExpr::from(e.clone())).collect()),
-            _ => Err(py_type_err(
-                "Encountered a non Aggregate type in aggregation_arguments",
+            _ => Err(PyTypeError::new_err(
+                "Encountered a non-Aggregate type in aggregation_arguments",
             )),
         }
     }
@@ -142,8 +142,8 @@ impl PyAggregate {
         match expr {
             Expr::Alias(Alias { expr, .. }) => Self::_agg_func_name(expr.as_ref()),
             Expr::AggregateFunction(AggregateFunction { func, .. }) => Ok(func.name().to_owned()),
-            _ => Err(py_type_err(
-                "Encountered a non Aggregate type in agg_func_name",
+            _ => Err(PyTypeError::new_err(
+                "Encountered a non-Aggregate type in agg_func_name",
             )),
         }
     }

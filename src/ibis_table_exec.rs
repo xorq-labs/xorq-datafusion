@@ -18,7 +18,6 @@ use futures::{Stream, TryStreamExt};
 use pyo3::types::PyIterator;
 use pyo3::{Bound, PyAny, PyObject, Python};
 
-use crate::errors::DataFusionError;
 use crate::utils::compute_properties;
 
 use pyo3::prelude::*;
@@ -80,9 +79,9 @@ impl IbisTableExec {
         _py: Python,
         record_batch_reader: &Bound<'_, PyAny>,
         projections: Option<&Vec<usize>>,
-    ) -> Result<Self, DataFusionError> {
+    ) -> Result<Self, PyErr> {
         // TODO use indices instead of columns
-        let columns: Option<Result<Vec<String>, DataFusionError>> = projections.map(|p| {
+        let columns: Option<Result<Vec<String>, PyErr>> = projections.map(|p| {
             p.iter()
                 .map(|index| {
                     let name: String = record_batch_reader

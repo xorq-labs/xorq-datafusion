@@ -15,7 +15,7 @@ use pyo3::{pyclass, pymethods, PyAny, PyObject, PyResult, Python};
 use crate::ibis_filter_expression::IbisFilterExpression;
 use crate::ibis_table_exec::IbisTableExec;
 
-use crate::errors::to_external_err;
+use crate::errors::PyDataFusionError;
 use pyo3::prelude::*;
 
 #[pyclass(name = "TableProvider", module = "let", subclass)]
@@ -76,10 +76,10 @@ impl TableProvider for PyTableProvider {
                         .clone_ref(py)
                 })
                 .collect::<Vec<PyObject>>();
-            let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
+            let ibis_filters = PyTuple::new(py, &args).map_err(PyDataFusionError::from)?;
             let kwargs = [("filters", ibis_filters)]
                 .into_py_dict(py)
-                .map_err(to_external_err)?;
+                .map_err(PyDataFusionError::from)?;
 
             let table = self
                 .table_provider

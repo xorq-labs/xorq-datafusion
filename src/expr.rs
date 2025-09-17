@@ -31,10 +31,11 @@ use datafusion_expr::{
     utils::exprlist_to_fields,
     Between, BinaryExpr, Case, Cast, Expr, Like, LogicalPlan, Operator, TryCast,
 };
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use sort_expr::PySortExpr;
 
 use crate::common::data_type::{DataTypeMap, RexType};
-use crate::errors::{py_runtime_err, py_type_err, DataFusionError};
+use crate::errors::PyDataFusionError;
 use crate::expr::aggregate_expr::PyAggregateFunction;
 use crate::expr::binary_expr::PyBinaryExpr;
 use crate::expr::case::PyCase;
@@ -157,7 +158,7 @@ impl PyExpr {
             Expr::AggregateFunction(expr) => {
                 Ok(PyAggregateFunction::from(expr.clone()).into_bound_py_any(py)?)
             }
-            other => Err(py_runtime_err(format!(
+            other => Err(PyValueError::new_err(format!(
                 "Cannot convert this Expr to a Python object: {:?}",
                 other
             ))),
@@ -318,7 +319,7 @@ impl PyExpr {
     pub fn python_value(&self, py: Python) -> PyResult<PyObject> {
         match &self.expr {
             Expr::Literal(scalar_value) => scalar_to_pyarrow(scalar_value, py),
-            _ => Err(py_type_err(format!(
+            _ => Err(PyTypeError::new_err(format!(
                 "Non Expr::Literal encountered in types: {:?}",
                 &self.expr
             ))),
@@ -432,7 +433,7 @@ impl PyExpr {
             | Expr::Wildcard { .. }
             | Expr::ScalarSubquery(..)
             | Expr::Placeholder { .. }
-            | Expr::Exists { .. } => Err(py_runtime_err(format!(
+            | Expr::Exists { .. } => Err(PyValueError::new_err(format!(
                 "Unimplemented Expr type: {}",
                 self.expr
             ))),
@@ -482,7 +483,7 @@ impl PyExpr {
                 }
             }
             _ => {
-                return Err(py_type_err(format!(
+                return Err(PyTypeError::new_err(format!(
                     "Catch all triggered in get_operator_name: {:?}",
                     &self.expr
                 )))
@@ -491,12 +492,12 @@ impl PyExpr {
     }
 
     pub fn column_name(&self, plan: PyLogicalPlan) -> PyResult<String> {
-        self._column_name(&plan.plan()).map_err(py_runtime_err)
+        self._column_name(&plan.plan()).map_err(|e| e.into())
     }
 }
 
 impl PyExpr {
-    pub fn _column_name(&self, plan: &LogicalPlan) -> Result<String, DataFusionError> {
+    pub fn _column_name(&self, plan: &LogicalPlan) -> Result<String, PyDataFusionError> {
         let field = Self::expr_to_field(&self.expr, plan)?;
         Ok(field.name().to_owned())
     }
@@ -505,7 +506,7 @@ impl PyExpr {
     pub fn expr_to_field(
         expr: &Expr,
         input_plan: &LogicalPlan,
-    ) -> Result<Arc<Field>, DataFusionError> {
+    ) -> Result<Arc<Field>, PyDataFusionError> {
         match expr {
             #[allow(deprecated)]
             Expr::Wildcard { .. } => {
@@ -556,12 +557,12 @@ impl PyExpr {
                 | Operator::BitwiseAnd
                 | Operator::BitwiseOr => DataTypeMap::map_from_arrow_type(&DataType::Binary),
                 Operator::AtArrow | Operator::ArrowAt => {
-                    Err(py_type_err(format!("Unsupported expr: ${op}")))
+                    Err(PyTypeError::new_err(format!("Unsupported expr: ${op}")))
                 }
             },
             Expr::Cast(Cast { expr: _, data_type }) => DataTypeMap::map_from_arrow_type(data_type),
             Expr::Literal(scalar_value) => DataTypeMap::map_from_scalar_value(scalar_value),
-            _ => Err(py_type_err(format!(
+            _ => Err(PyTypeError::new_err(format!(
                 "Non Expr::Literal encountered in types: {:?}",
                 expr
             ))),

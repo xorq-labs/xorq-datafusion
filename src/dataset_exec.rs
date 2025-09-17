@@ -8,14 +8,13 @@ use std::sync::Arc;
 
 use futures::{stream, TryStreamExt};
 
-use crate::errors::DataFusionError;
 use crate::pyarrow_filter_expression::PyArrowFilterExpression;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::{DataFusionError as InnerDataFusionError, Result as DFResult};
+use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::Expr;
@@ -65,8 +64,8 @@ impl DatasetExec {
         dataset: &Bound<'_, PyAny>,
         projection: Option<Vec<usize>>,
         filters: &[Expr],
-    ) -> Result<Self, DataFusionError> {
-        let columns: Option<Result<Vec<String>, DataFusionError>> = projection.map(|p| {
+    ) -> Result<Self, PyErr> {
+        let columns: Option<Result<Vec<String>, PyErr>> = projection.map(|p| {
             p.iter()
                 .map(|index| {
                     let name: String = dataset
@@ -178,39 +177,39 @@ impl ExecutionPlan for DatasetExec {
             let fragments = self.fragments.bind(py);
             let fragment = fragments
                 .get_item(partition)
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
             // We need to pass the dataset schema to unify the fragment and dataset schema per PyArrow docs
             let dataset_schema = dataset
                 .getattr("schema")
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
             let kwargs = PyDict::new(py);
             kwargs
                 .set_item("columns", self.columns.clone())
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
             kwargs
                 .set_item(
                     "filter",
                     self.filter_expr.as_ref().map(|expr| expr.clone_ref(py)),
                 )
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
             kwargs
                 .set_item("batch_size", batch_size)
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
             let scanner = fragment
                 .call_method("scanner", (dataset_schema,), Some(&kwargs))
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
             let schema: SchemaRef = Arc::new(
                 scanner
                     .getattr("projected_schema")
                     .and_then(|schema| Ok(schema.extract::<PyArrowType<_>>()?.0))
-                    .map_err(|err| InnerDataFusionError::External(Box::new(err)))?,
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?,
             );
             let record_batches: Bound<'_, PyIterator> = scanner
                 .call_method0("to_batches")
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?
+                .map_err(|err| DataFusionError::External(Box::new(err)))?
                 .try_iter()
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+                .map_err(|err| DataFusionError::External(Box::new(err)))?;
 
             let record_batches = PyArrowBatchesAdapter {
                 batches: record_batches.into(),

@@ -6,13 +6,12 @@ use arrow::datatypes::SchemaRef;
 use datafusion::physical_expr::{EquivalenceProperties, LexOrdering, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::PlanProperties;
-use datafusion_common::{Result, ScalarValue};
+use datafusion_common::{DataFusionError, Result, ScalarValue};
 use datafusion_expr::Volatility;
 use datafusion_expr::{ColumnarValue, ScalarFunctionImplementation};
 use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 
-use crate::errors::DataFusionError;
 use crate::TokioRuntime;
 
 /// Utility to get the Tokio Runtime from Python
@@ -45,7 +44,7 @@ pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionErro
         "stable" => Volatility::Stable,
         "volatile" => Volatility::Volatile,
         value => {
-            return Err(DataFusionError::Common(format!(
+            return Err(DataFusionError::Internal(format!(
                 "Unsupported volatility type: `{value}`, supported \
                  values are: immutable, stable and volatile."
             )))

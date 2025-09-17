@@ -3,9 +3,9 @@ use pyo3::prelude::*;
 use std::convert::TryFrom;
 use std::result::Result;
 
-use crate::errors::{DataFusionError, PyDataFusionResult};
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::{expr::InList, Between, BinaryExpr, Expr, Operator};
+use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::IntoPyObjectExt;
 
 #[derive(Debug)]
@@ -15,7 +15,7 @@ pub(crate) struct PyArrowFilterExpression(PyObject);
 fn operator_to_py<'py>(
     operator: &Operator,
     op: &Bound<'py, PyModule>,
-) -> Result<Bound<'py, PyAny>, DataFusionError> {
+) -> Result<Bound<'py, PyAny>, PyErr> {
     let py_op: Bound<'_, PyAny> = match operator {
         Operator::Eq => op.getattr("eq")?,
         Operator::NotEq => op.getattr("ne")?,
@@ -26,7 +26,7 @@ fn operator_to_py<'py>(
         Operator::And => op.getattr("and_")?,
         Operator::Or => op.getattr("or_")?,
         _ => {
-            return Err(DataFusionError::Common(format!(
+            return Err(PyNotImplementedError::new_err(format!(
                 "Unsupported operator {operator:?}"
             )))
         }
@@ -37,7 +37,7 @@ fn operator_to_py<'py>(
 pub fn extract_scalar_list<'py>(
     exprs: &[Expr],
     py: Python<'py>,
-) -> PyDataFusionResult<Vec<Bound<'py, PyAny>>> {
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let ret = exprs
         .iter()
         .map(|expr| match expr {
@@ -56,11 +56,11 @@ pub fn extract_scalar_list<'py>(
                 ScalarValue::Float32(Some(f)) => Ok(f.into_bound_py_any(py)?),
                 ScalarValue::Float64(Some(f)) => Ok(f.into_bound_py_any(py)?),
                 ScalarValue::Utf8(Some(s)) => Ok(s.into_bound_py_any(py)?),
-                _ => Err(DataFusionError::Common(format!(
+                _ => Err(PyValueError::new_err(format!(
                     "PyArrow can't handle ScalarValue: {v:?}"
                 ))),
             },
-            _ => Err(DataFusionError::Common(format!(
+            _ => Err(PyValueError::new_err(format!(
                 "Only a list of Literals are supported got {expr:?}"
             ))),
         })
@@ -74,13 +74,13 @@ impl PyArrowFilterExpression {
 }
 
 impl TryFrom<&Expr> for PyArrowFilterExpression {
-    type Error = DataFusionError;
+    type Error = PyErr;
 
     fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
         Python::with_gil(|py| {
             let pc = Python::import(py, "pyarrow.compute")?;
             let op_module = Python::import(py, "operator")?;
-            let pc_expr: Result<Bound<'_, PyAny>, DataFusionError> = match expr {
+            let pc_expr: Result<Bound<'_, PyAny>, PyErr> = match expr {
                 Expr::Column(Column { name, .. }) => Ok(pc.getattr("field")?.call1((name,))?),
                 Expr::Literal(v) => match v {
                     ScalarValue::Boolean(Some(b)) => Ok(pc.getattr("scalar")?.call1((*b,))?),
@@ -95,7 +95,7 @@ impl TryFrom<&Expr> for PyArrowFilterExpression {
                     ScalarValue::Float32(Some(f)) => Ok(pc.getattr("scalar")?.call1((*f,))?),
                     ScalarValue::Float64(Some(f)) => Ok(pc.getattr("scalar")?.call1((*f,))?),
                     ScalarValue::Utf8(Some(s)) => Ok(pc.getattr("scalar")?.call1((s,))?),
-                    _ => Err(DataFusionError::Common(format!(
+                    _ => Err(PyValueError::new_err(format!(
                         "PyArrow can't handle ScalarValue: {v:?}"
                     ))),
                 },
@@ -157,9 +157,8 @@ impl TryFrom<&Expr> for PyArrowFilterExpression {
                                 ret
                             }
                         })
-                        .map_err(DataFusionError::from)
                 }
-                _ => Err(DataFusionError::Common(format!(
+                _ => Err(PyValueError::new_err(format!(
                     "Unsupported Datafusion expression {expr:?}"
                 ))),
             };

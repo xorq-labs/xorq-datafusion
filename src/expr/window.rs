@@ -17,14 +17,13 @@
 
 use super::py_expr_list;
 use crate::common::df_schema::PyDFSchema;
-use crate::errors::py_type_err;
 use crate::expr::logical_node::LogicalNode;
 use crate::expr::PyExpr;
 use crate::sql::logical::PyLogicalPlan;
 use datafusion::logical_expr::expr::{WindowFunction, WindowFunctionParams};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{Expr, Window, WindowFrame, WindowFrameBound, WindowFrameUnits};
-use pyo3::exceptions::{PyNotImplementedError, PyValueError};
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use std::fmt::{self, Display, Formatter};
@@ -167,7 +166,7 @@ impl PyWindow {
 }
 
 fn not_window_function_err(expr: Expr) -> PyErr {
-    py_type_err(format!(
+    PyTypeError::new_err(format!(
         "Provided {} Expr {:?} is not a WindowFunction type",
         expr.variant_name(),
         expr

@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use tokio::task::JoinHandle;
 
-use crate::errors::{from_datafusion_error, py_datafusion_err};
+use crate::errors::PyDataFusionError;
 use crate::physical_plan::PyExecutionPlan;
 use crate::record_batch::PyRecordBatchStream;
 use crate::utils::{get_tokio_runtime, wait_for_completion, wait_for_future};
@@ -60,7 +60,7 @@ impl PyDataFrame {
 
     fn __repr__(&self, py: Python) -> PyResult<String> {
         let df = self.df.as_ref().clone().limit(0, Some(10))?;
-        let batches = wait_for_future(py, df.collect()).map_err(from_datafusion_error)?;
+        let batches = wait_for_future(py, df.collect()).map_err(PyDataFusionError)?;
         let batches_as_string = pretty::pretty_format_batches(&batches);
         match batches_as_string {
             Ok(batch) => Ok(format!("DataFrame()\n{batch}")),
@@ -71,7 +71,7 @@ impl PyDataFrame {
     /// Calculate summary statistics for a DataFrame
     fn describe(&self, py: Python) -> PyResult<Self> {
         let df = self.df.as_ref().clone();
-        let stat_df = wait_for_future(py, df.describe()).map_err(from_datafusion_error)?;
+        let stat_df = wait_for_future(py, df.describe()).map_err(PyDataFusionError)?;
         Ok(Self::new(stat_df))
     }
 
@@ -108,8 +108,8 @@ impl PyDataFrame {
     /// Unless some order is specified in the plan, there is no
     /// guarantee of the order of the result.
     fn collect(&self, py: Python) -> PyResult<Vec<PyObject>> {
-        let batches = wait_for_future(py, self.df.as_ref().clone().collect())
-            .map_err(from_datafusion_error)?;
+        let batches =
+            wait_for_future(py, self.df.as_ref().clone().collect()).map_err(PyDataFusionError)?;
         // cannot use PyResult<Vec<RecordBatch>> return type due to
         // https://github.com/PyO3/pyo3/issues/1813
         batches.into_iter().map(|rb| rb.to_pyarrow(py)).collect()
@@ -118,7 +118,7 @@ impl PyDataFrame {
     /// Cache DataFrame.
     fn cache(&self, py: Python) -> PyResult<Self> {
         let df =
-            wait_for_future(py, self.df.as_ref().clone().cache()).map_err(from_datafusion_error)?;
+            wait_for_future(py, self.df.as_ref().clone().cache()).map_err(PyDataFusionError)?;
         Ok(Self::new(df))
     }
 
@@ -126,7 +126,7 @@ impl PyDataFrame {
     /// maintaining the input partitioning.
     fn collect_partitioned(&self, py: Python) -> PyResult<Vec<Vec<PyObject>>> {
         let batches = wait_for_future(py, self.df.as_ref().clone().collect_partitioned())
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
 
         batches
             .into_iter()
@@ -257,7 +257,7 @@ impl PyDataFrame {
                 .clone()
                 .write_csv(path, DataFrameWriteOptions::new(), None),
         )
-        .map_err(from_datafusion_error)?;
+        .map_err(PyDataFusionError)?;
         Ok(())
     }
 
@@ -283,7 +283,7 @@ impl PyDataFrame {
                 Option::from(parquet_options),
             ),
         )
-        .map_err(from_datafusion_error)?;
+        .map_err(PyDataFusionError)?;
         Ok(())
     }
 
@@ -296,7 +296,7 @@ impl PyDataFrame {
                 .clone()
                 .write_json(path, DataFrameWriteOptions::new(), None),
         )
-        .map_err(from_datafusion_error)?;
+        .map_err(PyDataFusionError)?;
         Ok(())
     }
 
@@ -324,9 +324,13 @@ impl PyDataFrame {
         let rt = &get_tokio_runtime(py).0;
         let df = self.df.as_ref().clone();
 
-        let fut: JoinHandle<PyResult<SendableRecordBatchStream>> =
-            rt.spawn(async move { df.execute_stream().map_err(from_datafusion_error).await });
-        let stream = wait_for_completion(py, fut).map_err(py_datafusion_err)?;
+        let fut: JoinHandle<PyResult<SendableRecordBatchStream>> = rt.spawn(async move {
+            df.execute_stream()
+                .map_err(|e| PyDataFusionError(e).into())
+                .await
+        });
+        let stream =
+            wait_for_completion(py, fut).map_err(|e| PyValueError::new_err(format!("{e}")))?;
         Ok(PyRecordBatchStream::new(stream?))
     }
 
@@ -336,14 +340,14 @@ impl PyDataFrame {
         let df = self.df.as_ref().clone();
         let fut: JoinHandle<datafusion_common::Result<Vec<SendableRecordBatchStream>>> =
             rt.spawn(async move { df.execute_stream_partitioned().await });
-        let stream = wait_for_future(py, fut).map_err(py_datafusion_err)?;
+        let stream = wait_for_future(py, fut).map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
         match stream {
             Ok(batches) => Ok(batches
                 .into_iter()
                 .map(|batch_stream| PyRecordBatchStream::new(batch_stream))
                 .collect()),
-            Err(e) => Err(from_datafusion_error(e)),
+            Err(e) => Err(PyDataFusionError(e).into()),
         }
     }
 
@@ -404,7 +408,7 @@ impl PyDataFrame {
     /// Get the execution plan for this `DataFrame`
     fn execution_plan(&self, py: Python) -> PyResult<PyExecutionPlan> {
         let plan = wait_for_future(py, self.df.as_ref().clone().create_physical_plan())
-            .map_err(from_datafusion_error)?;
+            .map_err(PyDataFusionError)?;
         Ok(plan.into())
     }
 }
