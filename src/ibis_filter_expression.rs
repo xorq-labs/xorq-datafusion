@@ -49,7 +49,7 @@ impl TryFrom<&Expr> for IbisFilterExpression {
 
             let ibis_expr: Result<Bound<'_, PyAny>, DataFusionError> = match expr {
                 Expr::Column(Column { name, .. }) => Ok(deferred.getattr(name.as_str())?),
-                Expr::Literal(v) => match v {
+                Expr::Literal(v, _) => match v {
                     ScalarValue::Boolean(Some(b)) => Ok(ibis.getattr("literal")?.call1((*b,))?),
                     ScalarValue::Int8(Some(i)) => Ok(ibis.getattr("literal")?.call1((*i,))?),
                     ScalarValue::Int16(Some(i)) => Ok(ibis.getattr("literal")?.call1((*i,))?),

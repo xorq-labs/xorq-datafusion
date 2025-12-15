@@ -20,7 +20,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{make_array, Array, ArrayData, ArrayRef};
-use arrow::datatypes::Field;
 use datafusion::logical_expr::window_state::WindowAggState;
 use datafusion::scalar::ScalarValue;
 use pyo3::exceptions::PyValueError;
@@ -304,11 +303,8 @@ impl WindowUDFImpl for MultiColumnWindowUDF {
         (self.partition_evaluator_factory)()
     }
 
-    fn field(&self, field_args: WindowUDFFieldArgs) -> Result<Field> {
-        Ok(arrow::datatypes::Field::new(
-            field_args.name(),
-            self.return_type.clone(),
-            true,
-        ))
+    fn field(&self, field_args: WindowUDFFieldArgs) -> Result<arrow::datatypes::FieldRef> {
+        // TODO: Should nullable always be `true`?
+        Ok(arrow::datatypes::Field::new(field_args.name(), self.return_type.clone(), true).into())
     }
 }

@@ -62,7 +62,7 @@ impl PyLimit {
     fn skip(&self) -> usize {
         match self.limit.skip.as_deref() {
             Some(expr) => match *expr {
-                Expr::Literal(ScalarValue::Int64(s)) => {
+                Expr::Literal(ScalarValue::Int64(s), _) => {
                     // `skip = NULL` is equivalent to `skip = 0`
                     let s = s.unwrap_or(0);
                     if s >= 0 {
@@ -82,14 +82,14 @@ impl PyLimit {
     fn fetch(&self) -> Option<usize> {
         match self.limit.fetch.as_deref() {
             Some(expr) => match *expr {
-                Expr::Literal(ScalarValue::Int64(Some(s))) => {
+                Expr::Literal(ScalarValue::Int64(Some(s)), _) => {
                     if s >= 0 {
                         Some(s as usize)
                     } else {
                         None
                     }
                 }
-                Expr::Literal(ScalarValue::Int64(None)) => None,
+                Expr::Literal(ScalarValue::Int64(None), _) => None,
                 _ => None,
             },
             None => None,

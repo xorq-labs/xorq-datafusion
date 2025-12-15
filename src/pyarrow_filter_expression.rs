@@ -42,7 +42,7 @@ pub fn extract_scalar_list<'py>(
         .iter()
         .map(|expr| match expr {
             // TODO: should we also leverage `ScalarValue::to_pyarrow` here?
-            Expr::Literal(v) => match v {
+            Expr::Literal(v, _) => match v {
                 // The unwraps here are for infallible conversions
                 ScalarValue::Boolean(Some(b)) => Ok(b.into_bound_py_any(py)?),
                 ScalarValue::Int8(Some(i)) => Ok(i.into_bound_py_any(py)?),
@@ -82,7 +82,7 @@ impl TryFrom<&Expr> for PyArrowFilterExpression {
             let op_module = Python::import(py, "operator")?;
             let pc_expr: Result<Bound<'_, PyAny>, DataFusionError> = match expr {
                 Expr::Column(Column { name, .. }) => Ok(pc.getattr("field")?.call1((name,))?),
-                Expr::Literal(v) => match v {
+                Expr::Literal(v, _) => match v {
                     ScalarValue::Boolean(Some(b)) => Ok(pc.getattr("scalar")?.call1((*b,))?),
                     ScalarValue::Int8(Some(i)) => Ok(pc.getattr("scalar")?.call1((*i,))?),
                     ScalarValue::Int16(Some(i)) => Ok(pc.getattr("scalar")?.call1((*i,))?),

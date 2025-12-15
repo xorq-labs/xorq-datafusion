@@ -9,20 +9,20 @@ name = "xorq_datafusion"
 crate-type = ["cdylib"]
 
 [dependencies]
-tokio = { version = "=1.44.2", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "=1.45", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 pyo3 = { version = "0.24.0", features = ["extension-module", "abi3", "abi3-py38"] }
 pyo3-async-runtimes = { version = "0.24.0", features = ["tokio-runtime"]}
-datafusion =  { version = "=47.0.0", features = ["pyarrow", "avro"]}
-datafusion-common = { version = "=47.0.0", features = ["pyarrow"] }
-datafusion-expr = "=47.0.0"
+datafusion =  { version = "=48.0.0", features = ["pyarrow", "avro"]}
+datafusion-common = { version = "=48.0.0", features = ["pyarrow"] }
+datafusion-expr = "=48.0.0"
 prost = "=0.13.5"
-datafusion-optimizer = "=47.0.0"
-datafusion-sql = "=47.0.0"
+datafusion-optimizer = "=48.0.0"
+datafusion-sql = "=48.0.0"
 futures = "=0.3.31"
 async-trait = "=0.1.88"
-arrow = "=55.0.0"
-arrow-ord = "=55.0.0"
-datafusion-functions-aggregate = { version = "=47.0.0" }
+arrow = "=55.1.0"
+arrow-ord = "=55.1.0"
+datafusion-functions-aggregate = { version = "=48.0.0" }
 aws-config = "=0.101.0"
 aws-credential-types = "=0.101.0"
 object_store = { version = "=0.12.0", features = ["aws", "gcp", "http"] }
