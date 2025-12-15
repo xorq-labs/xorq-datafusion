@@ -401,7 +401,7 @@ impl PySessionContext {
         let reader = reader.0;
         let schema = reader.schema();
 
-        let mut ordering = LexOrdering::default();
+        let mut ordering = vec![];
         if let Some(exprs) = sort_order {
             for sort in exprs {
                 match sort.sort.expr {
@@ -423,7 +423,7 @@ impl PySessionContext {
                 }
             }
         }
-        let table = PyRecordBatchProvider::new(reader, ordering.clone());
+        let table = PyRecordBatchProvider::new(reader, LexOrdering::new(ordering).unwrap());
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(from_datafusion_error)?;

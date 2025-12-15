@@ -15,16 +15,20 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::common::df_schema::PyDFSchema;
-use crate::expr::{logical_node::LogicalNode, PyExpr};
-use crate::sql::logical::PyLogicalPlan;
-use datafusion_expr::logical_plan::{Join, JoinConstraint, JoinType};
-use pyo3::prelude::*;
-use pyo3::IntoPyObjectExt;
 use std::fmt::{self, Display, Formatter};
 
+use datafusion::common::NullEquality;
+use datafusion::logical_expr::logical_plan::{Join, JoinConstraint, JoinType};
+use pyo3::prelude::*;
+use pyo3::IntoPyObjectExt;
+
+use crate::common::df_schema::PyDFSchema;
+use crate::expr::logical_node::LogicalNode;
+use crate::expr::PyExpr;
+use crate::sql::logical::PyLogicalPlan;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[pyclass(name = "JoinType", module = "datafusion.expr")]
+#[pyclass(frozen, name = "JoinType", module = "datafusion.expr")]
 pub struct PyJoinType {
     join_type: JoinType,
 }
@@ -59,7 +63,7 @@ impl Display for PyJoinType {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[pyclass(name = "JoinConstraint", module = "datafusion.expr")]
+#[pyclass(frozen, name = "JoinConstraint", module = "datafusion.expr")]
 pub struct PyJoinConstraint {
     join_constraint: JoinConstraint,
 }
@@ -86,7 +90,7 @@ impl PyJoinConstraint {
     }
 }
 
-#[pyclass(name = "Join", module = "datafusion.expr", subclass)]
+#[pyclass(frozen, name = "Join", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyJoin {
     join: Join,
@@ -116,7 +120,7 @@ impl Display for PyJoin {
             JoinType: {:?}
             JoinConstraint: {:?}
             Schema: {:?}
-            NullEqualsNull: {:?}",
+            NullEquality: {:?}",
             &self.join.left,
             &self.join.right,
             &self.join.on,
@@ -124,7 +128,7 @@ impl Display for PyJoin {
             &self.join.join_type,
             &self.join.join_constraint,
             &self.join.schema,
-            &self.join.null_equals_null,
+            &self.join.null_equality,
         )
     }
 }
@@ -173,7 +177,10 @@ impl PyJoin {
 
     /// If null_equals_null is true, null == null else null != null
     fn null_equals_null(&self) -> PyResult<bool> {
-        Ok(self.join.null_equals_null)
+        match self.join.null_equality {
+            NullEquality::NullEqualsNothing => Ok(false),
+            NullEquality::NullEqualsNull => Ok(true),
+        }
     }
 
     fn __repr__(&self) -> PyResult<String> {
