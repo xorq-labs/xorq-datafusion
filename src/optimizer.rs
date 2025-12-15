@@ -49,14 +49,6 @@ impl PyOptimizerRule {
 }
 
 impl OptimizerRule for PyOptimizerRule {
-    fn try_optimize(
-        &self,
-        plan: &LogicalPlan,
-        _config: &dyn OptimizerConfig,
-    ) -> datafusion_common::Result<Option<LogicalPlan>> {
-        self.rewrite(plan.clone(), _config).map(|o| Some(o.data))
-    }
-
     fn name(&self) -> &str {
         "python rule"
     }

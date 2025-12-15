@@ -2,7 +2,7 @@ use arrow::array::{Array, AsArray, Int64Array};
 use arrow::datatypes::DataType;
 use datafusion::logical_expr::{ColumnarValue, Signature, Volatility};
 use datafusion_common::exec_err;
-use datafusion_expr::ScalarUDFImpl;
+use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl};
 use std::any::Any;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -43,15 +43,20 @@ impl ScalarUDFImpl for HashIntFunc {
         Ok(DataType::Int64)
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> datafusion_common::Result<ColumnarValue> {
-        if args.len() != 1 {
+    fn invoke_with_args(
+        &self,
+        args: ScalarFunctionArgs,
+    ) -> datafusion_common::Result<ColumnarValue> {
+        let input = &args.args;
+
+        if input.len() != 1 {
             return exec_err!(
                 "{:?} args were supplied but encode takes exactly two arguments",
-                args.len()
+                input.len()
             );
         }
 
-        let arrays = ColumnarValue::values_to_arrays(args)?;
+        let arrays = ColumnarValue::values_to_arrays(input)?;
         let mut result: Vec<i64> = Vec::new();
 
         match arrays[0].data_type() {
