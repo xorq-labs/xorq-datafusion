@@ -32,6 +32,7 @@ use crate::utils::parse_volatility;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType, ToPyArrow};
 use datafusion::error::Result;
+use datafusion::logical_expr::ptr_eq::PtrEq;
 use datafusion::logical_expr::{
     PartitionEvaluator, PartitionEvaluatorFactory, Signature, Volatility, WindowUDF, WindowUDFImpl,
 };
@@ -245,11 +246,12 @@ impl PyWindowUDF {
     }
 }
 
+#[derive(Hash, Eq, PartialEq)]
 pub struct MultiColumnWindowUDF {
     name: String,
     signature: Signature,
     return_type: DataType,
-    partition_evaluator_factory: PartitionEvaluatorFactory,
+    partition_evaluator_factory: PtrEq<PartitionEvaluatorFactory>,
 }
 
 impl std::fmt::Debug for MultiColumnWindowUDF {
@@ -277,7 +279,7 @@ impl MultiColumnWindowUDF {
             name,
             signature,
             return_type,
-            partition_evaluator_factory,
+            partition_evaluator_factory: partition_evaluator_factory.into(),
         }
     }
 }
