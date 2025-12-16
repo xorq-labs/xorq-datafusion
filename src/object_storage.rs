@@ -74,10 +74,10 @@ pub async fn get_s3_object_store_builder(
         let credentials = config
             .credentials_provider()
             .ok_or_else(|| {
-                DataFusionError::ObjectStore(object_store::Error::Generic {
+                DataFusionError::ObjectStore(Box::new(object_store::Error::Generic {
                     store: "S3",
                     source: "Failed to get S3 credentials from the environment".into(),
-                })
+                }))
             })?
             .clone();
 

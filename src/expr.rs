@@ -22,11 +22,11 @@ use std::sync::Arc;
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::functions::core::expr_ext::FieldAccessor;
-use datafusion::logical_expr::expr::{AggregateFunctionParams, WindowFunctionParams};
+use datafusion::logical_expr::expr::AggregateFunctionParams;
 use datafusion::scalar::ScalarValue;
 use datafusion_expr::{
     col,
-    expr::{AggregateFunction, InList, InSubquery, ScalarFunction, WindowFunction},
+    expr::{AggregateFunction, InList, InSubquery, ScalarFunction},
     lit,
     utils::exprlist_to_fields,
     Between, BinaryExpr, Case, Cast, Expr, Like, LogicalPlan, Operator, TryCast,
@@ -126,14 +126,18 @@ pub fn py_expr_list(expr: &[Expr]) -> PyResult<Vec<PyExpr>> {
 impl PyExpr {
     /// Return the specific expression
     fn to_variant<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        Python::with_gil(|_| match &self.expr {
+        Python::attach(|_| match &self.expr {
             Expr::Alias(alias) => Ok(PyAlias::new(&alias.expr, &alias.name).into_bound_py_any(py)?),
             Expr::Column(col) => Ok(PyColumn::from(col.clone()).into_bound_py_any(py)?),
             Expr::ScalarVariable(data_type, variables) => {
                 Ok(PyScalarVariable::new(data_type, variables).into_bound_py_any(py)?)
             }
             Expr::Like(value) => Ok(PyLike::from(value.clone()).into_bound_py_any(py)?),
-            Expr::Literal(value) => Ok(PyLiteral::from(value.clone()).into_bound_py_any(py)?),
+            Expr::Literal(value, metadata) => Ok(PyLiteral::new_with_metadata(
+                value.clone(),
+                metadata.clone(),
+            )
+            .into_bound_py_any(py)?),
             Expr::BinaryExpr(expr) => Ok(PyBinaryExpr::from(expr.clone()).into_bound_py_any(py)?),
             Expr::Not(expr) => Ok(PyNot::new(*expr.clone()).into_bound_py_any(py)?),
             Expr::IsNotNull(expr) => Ok(PyIsNotNull::new(*expr.clone()).into_bound_py_any(py)?),
@@ -158,8 +162,7 @@ impl PyExpr {
                 Ok(PyAggregateFunction::from(expr.clone()).into_bound_py_any(py)?)
             }
             other => Err(py_runtime_err(format!(
-                "Cannot convert this Expr to a Python object: {:?}",
-                other
+                "Cannot convert this Expr to a Python object: {other:?}"
             ))),
         })
     }
@@ -315,9 +318,9 @@ impl PyExpr {
     }
 
     /// Extracts the Expr value into a PyObject that can be shared with Python
-    pub fn python_value(&self, py: Python) -> PyResult<PyObject> {
+    pub fn python_value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match &self.expr {
-            Expr::Literal(scalar_value) => scalar_to_pyarrow(scalar_value, py),
+            Expr::Literal(scalar_value, _) => scalar_to_pyarrow(scalar_value, py),
             _ => Err(py_type_err(format!(
                 "Non Expr::Literal encountered in types: {:?}",
                 &self.expr
@@ -357,11 +360,13 @@ impl PyExpr {
                 params: AggregateFunctionParams { args, .. },
                 ..
             })
-            | Expr::ScalarFunction(ScalarFunction { args, .. })
-            | Expr::WindowFunction(WindowFunction {
-                params: WindowFunctionParams { args, .. },
-                ..
-            }) => Ok(args.iter().map(|arg| PyExpr::from(arg.clone())).collect()),
+            | Expr::ScalarFunction(ScalarFunction { args, .. }) => {
+                Ok(args.iter().map(|arg| PyExpr::from(arg.clone())).collect())
+            }
+            Expr::WindowFunction(boxed_window_fn) => {
+                let args = &boxed_window_fn.params.args;
+                Ok(args.iter().map(|arg| PyExpr::from(arg.clone())).collect())
+            }
 
             // Expr(s) that require more specific processing
             Expr::Case(Case {
@@ -555,15 +560,24 @@ impl PyExpr {
                 | Operator::BitwiseXor
                 | Operator::BitwiseAnd
                 | Operator::BitwiseOr => DataTypeMap::map_from_arrow_type(&DataType::Binary),
-                Operator::AtArrow | Operator::ArrowAt => {
-                    Err(py_type_err(format!("Unsupported expr: ${op}")))
-                }
+                Operator::AtArrow
+                | Operator::ArrowAt
+                | Operator::Arrow
+                | Operator::LongArrow
+                | Operator::HashArrow
+                | Operator::HashLongArrow
+                | Operator::AtAt
+                | Operator::IntegerDivide
+                | Operator::HashMinus
+                | Operator::AtQuestion
+                | Operator::Question
+                | Operator::QuestionAnd
+                | Operator::QuestionPipe => Err(py_type_err(format!("Unsupported expr: ${op}"))),
             },
             Expr::Cast(Cast { expr: _, data_type }) => DataTypeMap::map_from_arrow_type(data_type),
-            Expr::Literal(scalar_value) => DataTypeMap::map_from_scalar_value(scalar_value),
+            Expr::Literal(scalar_value, _) => DataTypeMap::map_from_scalar_value(scalar_value),
             _ => Err(py_type_err(format!(
-                "Non Expr::Literal encountered in types: {:?}",
-                expr
+                "Non Expr::Literal encountered in types: {expr:?}",
             ))),
         }
     }

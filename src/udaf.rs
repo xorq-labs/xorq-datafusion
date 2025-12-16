@@ -14,18 +14,18 @@ use datafusion_expr::{create_udaf, Accumulator, AccumulatorFactoryFunction, Aggr
 
 #[derive(Debug)]
 struct RustAccumulator {
-    accum: PyObject,
+    accum: Py<PyAny>,
 }
 
 impl RustAccumulator {
-    fn new(accum: PyObject) -> Self {
+    fn new(accum: Py<PyAny>) -> Self {
         Self { accum }
     }
 }
 
 impl Accumulator for RustAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // 1. cast args to Pyarrow array
             let py_args = values
                 .iter()
@@ -44,7 +44,7 @@ impl Accumulator for RustAccumulator {
     }
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
-        Python::with_gil(|py| self.accum.bind(py).call_method0("evaluate")?.extract())
+        Python::attach(|py| self.accum.bind(py).call_method0("evaluate")?.extract())
             .map_err(to_external_err)
     }
 
@@ -53,12 +53,12 @@ impl Accumulator for RustAccumulator {
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        Python::with_gil(|py| self.accum.bind(py).call_method0("state")?.extract())
+        Python::attach(|py| self.accum.bind(py).call_method0("state")?.extract())
             .map_err(to_external_err)
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let state = &states[0];
 
             // 1. cast states to Pyarrow array
@@ -75,7 +75,7 @@ impl Accumulator for RustAccumulator {
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // 1. cast args to Pyarrow array
             let py_args = values
                 .iter()
@@ -94,7 +94,7 @@ impl Accumulator for RustAccumulator {
     }
 
     fn supports_retract_batch(&self) -> bool {
-        Python::with_gil(
+        Python::attach(
             |py| match self.accum.bind(py).call_method0("supports_retract_batch") {
                 Ok(x) => x.extract().unwrap_or(false),
                 Err(_) => false,
@@ -103,9 +103,9 @@ impl Accumulator for RustAccumulator {
     }
 }
 
-pub fn to_rust_accumulator(accum: PyObject) -> AccumulatorFactoryFunction {
+pub fn to_rust_accumulator(accum: Py<PyAny>) -> AccumulatorFactoryFunction {
     Arc::new(move |_| -> Result<Box<dyn Accumulator>> {
-        let accum = Python::with_gil(|py| accum.call0(py).map_err(to_external_err))?;
+        let accum = Python::attach(|py| accum.call0(py).map_err(to_external_err))?;
         Ok(Box::new(RustAccumulator::new(accum)))
     })
 }
@@ -123,7 +123,7 @@ impl PyAggregateUDF {
     #[pyo3(signature=(name, accumulator, input_type, return_type, state_type, volatility))]
     fn new(
         name: &str,
-        accumulator: PyObject,
+        accumulator: Py<PyAny>,
         input_type: PyArrowType<Vec<DataType>>,
         return_type: PyArrowType<DataType>,
         state_type: PyArrowType<Vec<DataType>>,

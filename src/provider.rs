@@ -10,7 +10,7 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use pyo3::types::{IntoPyDict, PyAnyMethods, PyTuple};
-use pyo3::{pyclass, pymethods, PyAny, PyObject, PyResult, Python};
+use pyo3::{pyclass, pymethods, PyAny, PyResult, Python};
 
 use crate::ibis_filter_expression::IbisFilterExpression;
 use crate::ibis_table_exec::IbisTableExec;
@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 #[pyclass(name = "TableProvider", module = "let", subclass)]
 #[derive(Debug)]
 pub struct PyTableProvider {
-    table_provider: PyObject,
+    table_provider: Py<PyAny>,
 }
 
 #[pymethods]
@@ -42,7 +42,7 @@ impl TableProvider for PyTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let table_provider = self.table_provider.bind(py);
             Arc::new(
                 table_provider
@@ -66,7 +66,7 @@ impl TableProvider for PyTableProvider {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let args = filters
                 .iter()
                 .map(|filter| {
@@ -75,7 +75,7 @@ impl TableProvider for PyTableProvider {
                         .inner()
                         .clone_ref(py)
                 })
-                .collect::<Vec<PyObject>>();
+                .collect::<Vec<Py<PyAny>>>();
             let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
             let kwargs = [("filters", ibis_filters)]
                 .into_py_dict(py)

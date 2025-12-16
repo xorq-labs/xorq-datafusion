@@ -9,9 +9,6 @@ use datafusion_common::{plan_err, Result};
 use datafusion_expr::AggregateUDF;
 use datafusion_expr::WindowUDF;
 use datafusion_expr::{logical_plan::builder::LogicalTableSource, ScalarUDF, TableSource};
-use datafusion_functions_aggregate::average::avg_udaf;
-use datafusion_functions_aggregate::count::count_udaf;
-use datafusion_functions_aggregate::sum::sum_udaf;
 use datafusion_sql::sqlparser::dialect::dialect_from_str;
 use datafusion_sql::{
     planner::{ContextProvider, SqlToRel},
@@ -39,7 +36,7 @@ impl PyContextProvider {
     #[pyo3(signature = (tables, config_options=None))]
     #[new]
     fn new(
-        tables: HashMap<String, PyObject>,
+        tables: HashMap<String, Py<PyAny>>,
         config_options: Option<HashMap<String, String>>,
         py: Python,
     ) -> Self {
@@ -80,13 +77,8 @@ impl ContextProvider for PyContextProvider {
         None
     }
 
-    fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        match name.to_lowercase().as_str() {
-            "count" => Some(count_udaf()),
-            "sum" => Some(sum_udaf()),
-            "avg" => Some(avg_udaf()),
-            _ => None,
-        }
+    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
+        None
     }
 
     fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {

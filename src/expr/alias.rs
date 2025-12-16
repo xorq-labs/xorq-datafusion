@@ -62,6 +62,6 @@ impl PyAlias {
 
     /// Get a String representation of this column
     fn __repr__(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 }

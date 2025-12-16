@@ -3,9 +3,7 @@ use crate::dataframe::PyDataFrame;
 use crate::dataset::Dataset;
 use crate::errors::from_datafusion_error;
 use crate::expr::sort_expr::PySortExpr;
-use crate::functions::greatest::GreatestFunc;
 use crate::functions::hash_int::HashIntFunc;
-use crate::functions::least::LeastFunc;
 use crate::ibis_table::IbisTable;
 use crate::object_storage::{
     get_object_store, register_object_store_and_config_extensions, AwsOptions, GcpOptions,
@@ -224,8 +222,6 @@ impl PySessionContext {
 
         let ctx = SessionContext::new_with_state(session_state.clone());
         // register the UDF with the context, so it can be invoked by name and from SQL
-        ctx.register_udf(ScalarUDF::from(GreatestFunc::new()));
-        ctx.register_udf(ScalarUDF::from(LeastFunc::new()));
         ctx.register_udf(ScalarUDF::from(HashIntFunc::new()));
 
         Ok(PySessionContext { ctx })
@@ -401,7 +397,7 @@ impl PySessionContext {
         let reader = reader.0;
         let schema = reader.schema();
 
-        let mut ordering = LexOrdering::default();
+        let mut ordering = vec![];
         if let Some(exprs) = sort_order {
             for sort in exprs {
                 match sort.sort.expr {
@@ -423,7 +419,9 @@ impl PySessionContext {
                 }
             }
         }
-        let table = PyRecordBatchProvider::new(reader, ordering.clone());
+        let ordering_option = LexOrdering::new(ordering);
+
+        let table = PyRecordBatchProvider::new(reader, ordering_option);
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(from_datafusion_error)?;

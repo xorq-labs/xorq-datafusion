@@ -13,10 +13,10 @@ use datafusion_expr::ScalarUDF;
 /// Create a DataFusion's UDF implementation from a python function
 /// that expects pyarrow arrays. This is more efficient as it performs
 /// a zero-copy of the contents.
-fn to_rust_function(func: PyObject) -> ScalarFunctionImplementation {
+fn to_rust_function(func: Py<PyAny>) -> ScalarFunctionImplementation {
     make_scalar_function(
         move |args: &[ArrayRef]| -> Result<ArrayRef, DataFusionError> {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 // 1. cast args to Pyarrow arrays
                 let py_args = args
                     .iter()
@@ -47,7 +47,7 @@ impl PyScalarUDF {
     #[new]
     fn new(
         name: &str,
-        func: PyObject,
+        func: Py<PyAny>,
         input_types: PyArrowType<Vec<DataType>>,
         return_type: PyArrowType<DataType>,
         volatility: &str,

@@ -32,7 +32,7 @@ impl PyOptimizer {
 #[pyclass(name = "OptimizerRule", module = "let", subclass)]
 #[derive(Debug)]
 pub struct PyOptimizerRule {
-    pub(crate) rule: PyObject,
+    pub(crate) rule: Py<PyAny>,
 }
 
 unsafe impl Send for PyOptimizerRule {}
@@ -49,14 +49,6 @@ impl PyOptimizerRule {
 }
 
 impl OptimizerRule for PyOptimizerRule {
-    fn try_optimize(
-        &self,
-        plan: &LogicalPlan,
-        _config: &dyn OptimizerConfig,
-    ) -> datafusion_common::Result<Option<LogicalPlan>> {
-        self.rewrite(plan.clone(), _config).map(|o| Some(o.data))
-    }
-
     fn name(&self) -> &str {
         "python rule"
     }
@@ -70,7 +62,7 @@ impl OptimizerRule for PyOptimizerRule {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> datafusion_common::Result<Transformed<LogicalPlan>, DataFusionError> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let py_plan = PyLogicalPlan::new(plan);
             let py_plan = self
                 .rule

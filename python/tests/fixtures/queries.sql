@@ -314,7 +314,7 @@ SELECT DEGREES(5.556) AS "tmp"
 SELECT * FROM (SELECT * FROM "functional_alltypes" AS "t0" WHERE "t0"."int_col" >= 2) AS "t1" WHERE RANDOM() <= 0.1
 SELECT "t0"."id", COALESCE(NULLIF("t0"."int_col", 1), 20) AS "int_col", NULLIF("t0"."double_col", 3.0) AS "double_col", NULLIF("t0"."string_col", '2') AS "string_col" FROM "functional_alltypes" AS "t0"
 SELECT CASE (DATE_PART('dow', CAST('2017-01-02' AS DATE)) + 6) % 7 WHEN 0 THEN 'Monday' WHEN 1 THEN 'Tuesday' WHEN 2 THEN 'Wednesday' WHEN 3 THEN 'Thursday' WHEN 4 THEN 'Friday' WHEN 5 THEN 'Saturday' WHEN 6 THEN 'Sunday' END AS "tmp"
-SELECT TO_TIMESTAMP_MICROS(CAST(NOW() AS VARCHAR)) AS "tmp"
+SELECT TO_TIMESTAMP_MICROS(TO_CHAR(NOW(), '%Y-%m-%d'), '%Y-%m-%d') AS "tmp"
 SELECT * FROM (SELECT * FROM "functional_alltypes" AS "t0" WHERE "t0"."id" < 100) AS "t1" ORDER BY RANDOM() ASC LIMIT 5
 SELECT ROUND(5.5) AS "tmp"
 SELECT * FROM "functional_alltypes" AS "t0" WHERE ARROW_CAST("t0"."timestamp_col", 'Timestamp(Microsecond, Some("UTC"))') < ARROW_CAST('2010-03-02 00:00:00.000123', 'Timestamp(Microsecond, None)')
@@ -333,7 +333,7 @@ SELECT * FROM "functional_alltypes" AS "t0" WHERE NOT ("t0"."bool_col") ORDER BY
 SELECT NULLIF(5, 5) AS "NullIf(5, 5)"
 SELECT 2 | 4 AS "BitwiseOr(2, 4)"
 SELECT COALESCE(NULL, NULL, 3.14) AS "tmp"
-SELECT TO_TIMESTAMP_MICROS(CAST(NOW() AS VARCHAR)) AS "now" FROM "functional_alltypes" AS "t0" LIMIT 2
+SELECT TO_TIMESTAMP_MICROS(TO_CHAR(NOW(), '%Y-%m-%d'), '%Y-%m-%d') AS "now" FROM "functional_alltypes" AS "t0" LIMIT 2
 SELECT RADIANS(5.556) AS "tmp"
 SELECT * FROM "functional_alltypes" AS "t0" WHERE ARROW_CAST("t0"."timestamp_col", 'Timestamp(Microsecond, Some("UTC"))') > ARROW_CAST('2010-03-02 00:00:00.000123', 'Timestamp(Microsecond, None)')
 SELECT FALSE AS "tmp"
@@ -469,3 +469,6 @@ SELECT SUM(CASE "t0"."string_col" WHEN '1-URGENT' THEN 1 ELSE 0 END) AS "high_li
 SELECT "t1"."x", SUM("t1"."double_col") AS "sum" FROM (SELECT "t1"."id", "t1"."bool_col", "t1"."tinyint_col", "t1"."smallint_col", "t1"."int_col", "t1"."bigint_col", "t1"."float_col", "t1"."double_col", "t1"."date_string_col", "t1"."string_col", "t1"."timestamp_col", "t1"."year", "t1"."month", "t1"."x" FROM (SELECT "t0"."id", "t0"."bool_col", "t0"."tinyint_col", "t0"."smallint_col", "t0"."int_col", "t0"."bigint_col", "t0"."float_col", "t0"."double_col", "t0"."date_string_col", "t0"."string_col", "t0"."timestamp_col", "t0"."year", "t0"."month", 1 AS "x" FROM "functional_alltypes" AS "t0" WHERE "t0"."string_col" = '1') AS "t1") AS t1 GROUP BY "t1"."x"
 SELECT MIN("t0"."int_col") AS "Min(int_col)", MAX("t0"."int_col") AS "Max(int_col)" FROM "functional_alltypes" AS "t0"
 SELECT * FROM (SELECT "t1"."Add(bigint_col, 1)", COUNT(*) AS "Add(bigint_col, 1)_count" FROM (SELECT "t1"."Add(bigint_col, 1)" FROM (SELECT "t0"."bigint_col" + 1 AS "Add(bigint_col, 1)" FROM "functional_alltypes" AS "t0") AS "t1") AS t1 GROUP BY "t1"."Add(bigint_col, 1)") AS "t2" ORDER BY "t2"."Add(bigint_col, 1)" ASC, "t2"."Add(bigint_col, 1)_count" ASC
+SELECT APPROX_PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "t0"."double_col") AS "tmp" FROM "functional_alltypes" AS "t0"
+SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "t0"."double_col") AS "tmp" FROM "functional_alltypes" AS "t0"
+SELECT QUANTILE_CONT(0.50) WITHIN GROUP (ORDER BY "t0"."double_col") AS "tmp" FROM "functional_alltypes" AS "t0"

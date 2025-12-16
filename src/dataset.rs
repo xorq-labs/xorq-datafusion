@@ -39,7 +39,7 @@ use crate::pyarrow_filter_expression::PyArrowFilterExpression;
 // Wraps a pyarrow.dataset.Dataset class and implements a Datafusion TableProvider around it
 #[derive(Debug)]
 pub(crate) struct Dataset {
-    dataset: PyObject,
+    dataset: Py<PyAny>,
 }
 
 impl Dataset {
@@ -68,7 +68,7 @@ impl TableProvider for Dataset {
     }
 
     fn schema(&self) -> SchemaRef {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dataset = self.dataset.bind(py);
             Arc::new(
                 dataset
@@ -92,7 +92,7 @@ impl TableProvider for Dataset {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let plan: Arc<dyn ExecutionPlan> = Arc::new(
                 DatasetExec::new(py, self.dataset.bind(py), projection.cloned(), filters)
                     .map_err(|err| DataFusionError::External(Box::new(err)))?,

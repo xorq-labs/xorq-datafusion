@@ -16,7 +16,7 @@
 // under the License.
 
 use crate::errors::to_external_err;
-use datafusion_common::ScalarValue;
+use datafusion::{common::ScalarValue, logical_expr::expr::FieldMetadata};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -24,6 +24,13 @@ use pyo3::prelude::*;
 #[derive(Clone)]
 pub struct PyLiteral {
     pub value: ScalarValue,
+    pub metadata: Option<FieldMetadata>,
+}
+
+impl PyLiteral {
+    pub fn new_with_metadata(value: ScalarValue, metadata: Option<FieldMetadata>) -> PyLiteral {
+        Self { value, metadata }
+    }
 }
 
 impl From<PyLiteral> for ScalarValue {
@@ -34,7 +41,10 @@ impl From<PyLiteral> for ScalarValue {
 
 impl From<ScalarValue> for PyLiteral {
     fn from(value: ScalarValue) -> PyLiteral {
-        PyLiteral { value }
+        PyLiteral {
+            value,
+            metadata: None,
+        }
     }
 }
 
@@ -145,7 +155,7 @@ impl PyLiteral {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    fn into_type(&self, py: Python) -> PyResult<PyObject> {
+    fn into_type(&self, py: Python) -> PyResult<Py<PyAny>> {
         Ok(self
             .clone()
             .into_pyobject(py)

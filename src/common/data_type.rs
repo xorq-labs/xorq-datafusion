@@ -171,7 +171,7 @@ impl DataTypeMap {
                 SqlType::DATE,
             )),
             DataType::Duration(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", arrow_type),
+                format!("{arrow_type:?}"),
             ))),
             DataType::Interval(interval_unit) => Ok(DataTypeMap::new(
                 DataType::Interval(*interval_unit),
@@ -188,7 +188,7 @@ impl DataTypeMap {
                 SqlType::BINARY,
             )),
             DataType::FixedSizeBinary(_) => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", arrow_type)),
+                DataFusionError::NotImplemented(format!("{arrow_type:?}")),
             )),
             DataType::LargeBinary => Ok(DataTypeMap::new(
                 DataType::LargeBinary,
@@ -206,24 +206,33 @@ impl DataTypeMap {
                 SqlType::VARCHAR,
             )),
             DataType::List(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                arrow_type
+                "{arrow_type:?}"
             )))),
             DataType::FixedSizeList(_, _) => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", arrow_type)),
+                DataFusionError::NotImplemented(format!("{arrow_type:?}")),
             )),
             DataType::LargeList(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", arrow_type),
+                format!("{arrow_type:?}"),
             ))),
             DataType::Struct(_) => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", arrow_type),
+                format!("{arrow_type:?}"),
             ))),
             DataType::Union(_, _) => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", arrow_type),
+                format!("{arrow_type:?}"),
             ))),
             DataType::Dictionary(_, _) => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", arrow_type),
+                format!("{arrow_type:?}"),
             ))),
+            DataType::Decimal32(precision, scale) => Ok(DataTypeMap::new(
+                DataType::Decimal32(*precision, *scale),
+                PythonType::Float,
+                SqlType::DECIMAL,
+            )),
+            DataType::Decimal64(precision, scale) => Ok(DataTypeMap::new(
+                DataType::Decimal64(*precision, *scale),
+                PythonType::Float,
+                SqlType::DECIMAL,
+            )),
             DataType::Decimal128(precision, scale) => Ok(DataTypeMap::new(
                 DataType::Decimal128(*precision, *scale),
                 PythonType::Float,
@@ -235,14 +244,13 @@ impl DataTypeMap {
                 SqlType::DECIMAL,
             )),
             DataType::Map(_, _) => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", arrow_type),
+                format!("{arrow_type:?}"),
             ))),
             DataType::RunEndEncoded(_, _) => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", arrow_type)),
+                DataFusionError::NotImplemented(format!("{arrow_type:?}")),
             )),
             _ => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                arrow_type
+                "{arrow_type:?}"
             )))),
         }
     }
@@ -328,8 +336,7 @@ impl DataTypeMap {
             ScalarValue::DurationMicrosecond(_) => Ok(DataType::Duration(TimeUnit::Microsecond)),
             ScalarValue::DurationNanosecond(_) => Ok(DataType::Duration(TimeUnit::Nanosecond)),
             _ => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                scalar_val
+                "{scalar_val:?}"
             )))),
         }
     }
@@ -364,8 +371,7 @@ impl DataTypeMap {
             "double" => Ok(DataType::Float64),
             "byte_array" => Ok(DataType::Utf8),
             _ => Err(PyValueError::new_err(format!(
-                "Unable to determine Arrow Data Type from Parquet String type: {:?}",
-                parquet_str_type
+                "Unable to determine Arrow Data Type from Parquet String type: {parquet_str_type:?}"
             ))),
         };
         DataTypeMap::map_from_arrow_type(&arrow_dtype?)
@@ -389,12 +395,10 @@ impl DataTypeMap {
     pub fn py_map_from_sql_type(sql_type: &SqlType) -> PyResult<DataTypeMap> {
         match sql_type {
             SqlType::ANY => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::ARRAY => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::BIGINT => Ok(DataTypeMap::new(
                 DataType::Int64,
@@ -417,11 +421,10 @@ impl DataTypeMap {
                 SqlType::CHAR,
             )),
             SqlType::COLUMN_LIST => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::CURSOR => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::DATE => Ok(DataTypeMap::new(
                 DataType::Date64,
@@ -434,8 +437,7 @@ impl DataTypeMap {
                 SqlType::DECIMAL,
             )),
             SqlType::DISTINCT => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::DOUBLE => Ok(DataTypeMap::new(
                 DataType::Decimal256(1, 1),
@@ -443,7 +445,7 @@ impl DataTypeMap {
                 SqlType::DOUBLE,
             )),
             SqlType::DYNAMIC_STAR => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::FLOAT => Ok(DataTypeMap::new(
                 DataType::Decimal128(1, 1),
@@ -451,8 +453,7 @@ impl DataTypeMap {
                 SqlType::FLOAT,
             )),
             SqlType::GEOMETRY => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}",
             )))),
             SqlType::INTEGER => Ok(DataTypeMap::new(
                 DataType::Int8,
@@ -460,55 +461,52 @@ impl DataTypeMap {
                 SqlType::INTEGER,
             )),
             SqlType::INTERVAL => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::INTERVAL_DAY => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_DAY_HOUR => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_DAY_MINUTE => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::INTERVAL_DAY_SECOND => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::INTERVAL_HOUR => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_HOUR_MINUTE => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::INTERVAL_HOUR_SECOND => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::INTERVAL_MINUTE => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_MINUTE_SECOND => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::INTERVAL_MONTH => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_SECOND => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_YEAR => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::INTERVAL_YEAR_MONTH => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::MAP => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::MULTISET => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::NULL => Ok(DataTypeMap::new(
                 DataType::Null,
@@ -516,20 +514,16 @@ impl DataTypeMap {
                 SqlType::NULL,
             )),
             SqlType::OTHER => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::REAL => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::ROW => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::SARG => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::SMALLINT => Ok(DataTypeMap::new(
                 DataType::Int16,
@@ -537,25 +531,22 @@ impl DataTypeMap {
                 SqlType::SMALLINT,
             )),
             SqlType::STRUCTURED => Err(py_datafusion_err(DataFusionError::NotImplemented(
-                format!("{:?}", sql_type),
+                format!("{sql_type:?}"),
             ))),
             SqlType::SYMBOL => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::TIME => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::TIME_WITH_LOCAL_TIME_ZONE => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::TIMESTAMP => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::TIMESTAMP_WITH_LOCAL_TIME_ZONE => Err(py_datafusion_err(
-                DataFusionError::NotImplemented(format!("{:?}", sql_type)),
+                DataFusionError::NotImplemented(format!("{sql_type:?}")),
             )),
             SqlType::TINYINT => Ok(DataTypeMap::new(
                 DataType::Int8,
@@ -563,8 +554,7 @@ impl DataTypeMap {
                 SqlType::TINYINT,
             )),
             SqlType::UNKNOWN => Err(py_datafusion_err(DataFusionError::NotImplemented(format!(
-                "{:?}",
-                sql_type
+                "{sql_type:?}"
             )))),
             SqlType::VARBINARY => Ok(DataTypeMap::new(
                 DataType::LargeBinary,
@@ -616,6 +606,8 @@ impl DataTypeMap {
             DataType::Struct(_) => Ok("Struct"),
             DataType::Union(_, _) => Ok("Union"),
             DataType::Dictionary(_, _) => Ok("Dictionary"),
+            DataType::Decimal32(_, _) => Ok("Decimal32"),
+            DataType::Decimal64(_, _) => Ok("Decimal64"),
             DataType::Decimal128(_, _) => Ok("Decimal128"),
             DataType::Decimal256(_, _) => Ok("Decimal256"),
             DataType::Map(_, _) => Ok("Map"),
@@ -666,8 +658,7 @@ impl PyDataType {
             "datetime64" => Ok(DataType::Date64),
             "object" => Ok(DataType::Utf8),
             _ => Err(PyValueError::new_err(format!(
-                "Unable to determine Arrow Data Type from Arrow String type: {:?}",
-                arrow_str_type
+                "Unable to determine Arrow Data Type from Arrow String type: {arrow_str_type:?}"
             ))),
         };
         Ok(PyDataType {

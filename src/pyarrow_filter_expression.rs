@@ -10,7 +10,7 @@ use pyo3::IntoPyObjectExt;
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub(crate) struct PyArrowFilterExpression(PyObject);
+pub(crate) struct PyArrowFilterExpression(Py<PyAny>);
 
 fn operator_to_py<'py>(
     operator: &Operator,
@@ -42,7 +42,7 @@ pub fn extract_scalar_list<'py>(
         .iter()
         .map(|expr| match expr {
             // TODO: should we also leverage `ScalarValue::to_pyarrow` here?
-            Expr::Literal(v) => match v {
+            Expr::Literal(v, _) => match v {
                 // The unwraps here are for infallible conversions
                 ScalarValue::Boolean(Some(b)) => Ok(b.into_bound_py_any(py)?),
                 ScalarValue::Int8(Some(i)) => Ok(i.into_bound_py_any(py)?),
@@ -68,7 +68,7 @@ pub fn extract_scalar_list<'py>(
     ret
 }
 impl PyArrowFilterExpression {
-    pub fn inner(&self) -> &PyObject {
+    pub fn inner(&self) -> &Py<PyAny> {
         &self.0
     }
 }
@@ -77,12 +77,12 @@ impl TryFrom<&Expr> for PyArrowFilterExpression {
     type Error = DataFusionError;
 
     fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let pc = Python::import(py, "pyarrow.compute")?;
             let op_module = Python::import(py, "operator")?;
             let pc_expr: Result<Bound<'_, PyAny>, DataFusionError> = match expr {
                 Expr::Column(Column { name, .. }) => Ok(pc.getattr("field")?.call1((name,))?),
-                Expr::Literal(v) => match v {
+                Expr::Literal(v, _) => match v {
                     ScalarValue::Boolean(Some(b)) => Ok(pc.getattr("scalar")?.call1((*b,))?),
                     ScalarValue::Int8(Some(i)) => Ok(pc.getattr("scalar")?.call1((*i,))?),
                     ScalarValue::Int16(Some(i)) => Ok(pc.getattr("scalar")?.call1((*i,))?),
