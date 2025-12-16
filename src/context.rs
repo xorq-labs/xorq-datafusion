@@ -3,9 +3,7 @@ use crate::dataframe::PyDataFrame;
 use crate::dataset::Dataset;
 use crate::errors::from_datafusion_error;
 use crate::expr::sort_expr::PySortExpr;
-use crate::functions::greatest::GreatestFunc;
 use crate::functions::hash_int::HashIntFunc;
-use crate::functions::least::LeastFunc;
 use crate::ibis_table::IbisTable;
 use crate::object_storage::{
     get_object_store, register_object_store_and_config_extensions, AwsOptions, GcpOptions,
@@ -224,8 +222,6 @@ impl PySessionContext {
 
         let ctx = SessionContext::new_with_state(session_state.clone());
         // register the UDF with the context, so it can be invoked by name and from SQL
-        ctx.register_udf(ScalarUDF::from(GreatestFunc::new()));
-        ctx.register_udf(ScalarUDF::from(LeastFunc::new()));
         ctx.register_udf(ScalarUDF::from(HashIntFunc::new()));
 
         Ok(PySessionContext { ctx })
