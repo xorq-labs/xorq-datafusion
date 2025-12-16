@@ -10,7 +10,7 @@ use pyo3::IntoPyObjectExt;
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub(crate) struct PyArrowFilterExpression(PyObject);
+pub(crate) struct PyArrowFilterExpression(Py<PyAny>);
 
 fn operator_to_py<'py>(
     operator: &Operator,
@@ -68,7 +68,7 @@ pub fn extract_scalar_list<'py>(
     ret
 }
 impl PyArrowFilterExpression {
-    pub fn inner(&self) -> &PyObject {
+    pub fn inner(&self) -> &Py<PyAny> {
         &self.0
     }
 }
@@ -77,7 +77,7 @@ impl TryFrom<&Expr> for PyArrowFilterExpression {
     type Error = DataFusionError;
 
     fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let pc = Python::import(py, "pyarrow.compute")?;
             let op_module = Python::import(py, "operator")?;
             let pc_expr: Result<Bound<'_, PyAny>, DataFusionError> = match expr {

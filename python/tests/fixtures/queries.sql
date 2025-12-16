@@ -470,3 +470,5 @@ SELECT "t1"."x", SUM("t1"."double_col") AS "sum" FROM (SELECT "t1"."id", "t1"."b
 SELECT MIN("t0"."int_col") AS "Min(int_col)", MAX("t0"."int_col") AS "Max(int_col)" FROM "functional_alltypes" AS "t0"
 SELECT * FROM (SELECT "t1"."Add(bigint_col, 1)", COUNT(*) AS "Add(bigint_col, 1)_count" FROM (SELECT "t1"."Add(bigint_col, 1)" FROM (SELECT "t0"."bigint_col" + 1 AS "Add(bigint_col, 1)" FROM "functional_alltypes" AS "t0") AS "t1") AS t1 GROUP BY "t1"."Add(bigint_col, 1)") AS "t2" ORDER BY "t2"."Add(bigint_col, 1)" ASC, "t2"."Add(bigint_col, 1)_count" ASC
 SELECT APPROX_PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "t0"."double_col") AS "tmp" FROM "functional_alltypes" AS "t0"
+SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY "t0"."double_col") AS "tmp" FROM "functional_alltypes" AS "t0"
+SELECT QUANTILE_CONT(0.50) WITHIN GROUP (ORDER BY "t0"."double_col") AS "tmp" FROM "functional_alltypes" AS "t0"

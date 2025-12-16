@@ -8,7 +8,7 @@ use datafusion_expr::{Between, BinaryExpr, Expr, Operator};
 
 #[derive(Debug)]
 #[repr(transparent)]
-pub(crate) struct IbisFilterExpression(PyObject);
+pub(crate) struct IbisFilterExpression(Py<PyAny>);
 
 fn operator_to_py<'py>(
     operator: &Operator,
@@ -33,7 +33,7 @@ fn operator_to_py<'py>(
 }
 
 impl IbisFilterExpression {
-    pub fn inner(&self) -> &PyObject {
+    pub fn inner(&self) -> &Py<PyAny> {
         &self.0
     }
 }
@@ -42,7 +42,7 @@ impl TryFrom<&Expr> for IbisFilterExpression {
     type Error = DataFusionError;
 
     fn try_from(expr: &Expr) -> Result<Self, Self::Error> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let ibis = Python::import(py, "xorq.vendor.ibis")?;
             let op_module = Python::import(py, "operator")?;
             let deferred = ibis.getattr("_")?;

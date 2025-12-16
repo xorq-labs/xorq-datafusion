@@ -66,12 +66,12 @@ impl PyEmptyRelation {
     }
 
     fn arrow_schema(&self) -> PyArrowType<Schema> {
-        PyArrowType(self.empty.schema.as_ref().into())
+        PyArrowType(self.empty.schema.as_arrow().clone())
     }
 
     /// Get a String representation of this column
     fn __repr__(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 
     fn __name__(&self) -> PyResult<String> {

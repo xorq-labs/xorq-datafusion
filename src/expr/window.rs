@@ -179,7 +179,7 @@ impl PyWindowFrame {
             "range" => WindowFrameUnits::Range,
             "groups" => WindowFrameUnits::Groups,
             _ => {
-                return Err(PyNotImplementedError::new_err(format!("{:?}", units,)));
+                return Err(PyNotImplementedError::new_err(format!("{units:?}")));
             }
         };
         let start_bound = match start_bound {
@@ -190,7 +190,7 @@ impl PyWindowFrame {
                 WindowFrameUnits::Range => WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Rows => WindowFrameBound::Preceding(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Groups => {
-                    return Err(PyNotImplementedError::new_err(format!("{:?}", units,)));
+                    return Err(PyNotImplementedError::new_err(format!("{units:?}")));
                 }
             },
         };
@@ -200,7 +200,7 @@ impl PyWindowFrame {
                 WindowFrameUnits::Rows => WindowFrameBound::Following(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Range => WindowFrameBound::Following(ScalarValue::UInt64(None)),
                 WindowFrameUnits::Groups => {
-                    return Err(PyNotImplementedError::new_err(format!("{:?}", units,)));
+                    return Err(PyNotImplementedError::new_err(format!("{units:?}")));
                 }
             },
         };
@@ -224,7 +224,7 @@ impl PyWindowFrame {
 
     /// Get a String representation of this window frame
     fn __repr__(&self) -> String {
-        format!("{}", self)
+        format!("{self}")
     }
 }
 

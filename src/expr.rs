@@ -126,7 +126,7 @@ pub fn py_expr_list(expr: &[Expr]) -> PyResult<Vec<PyExpr>> {
 impl PyExpr {
     /// Return the specific expression
     fn to_variant<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        Python::with_gil(|_| match &self.expr {
+        Python::attach(|_| match &self.expr {
             Expr::Alias(alias) => Ok(PyAlias::new(&alias.expr, &alias.name).into_bound_py_any(py)?),
             Expr::Column(col) => Ok(PyColumn::from(col.clone()).into_bound_py_any(py)?),
             Expr::ScalarVariable(data_type, variables) => {
@@ -162,8 +162,7 @@ impl PyExpr {
                 Ok(PyAggregateFunction::from(expr.clone()).into_bound_py_any(py)?)
             }
             other => Err(py_runtime_err(format!(
-                "Cannot convert this Expr to a Python object: {:?}",
-                other
+                "Cannot convert this Expr to a Python object: {other:?}"
             ))),
         })
     }
@@ -319,7 +318,7 @@ impl PyExpr {
     }
 
     /// Extracts the Expr value into a PyObject that can be shared with Python
-    pub fn python_value(&self, py: Python) -> PyResult<PyObject> {
+    pub fn python_value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match &self.expr {
             Expr::Literal(scalar_value, _) => scalar_to_pyarrow(scalar_value, py),
             _ => Err(py_type_err(format!(
@@ -578,8 +577,7 @@ impl PyExpr {
             Expr::Cast(Cast { expr: _, data_type }) => DataTypeMap::map_from_arrow_type(data_type),
             Expr::Literal(scalar_value, _) => DataTypeMap::map_from_scalar_value(scalar_value),
             _ => Err(py_type_err(format!(
-                "Non Expr::Literal encountered in types: {:?}",
-                expr
+                "Non Expr::Literal encountered in types: {expr:?}",
             ))),
         }
     }

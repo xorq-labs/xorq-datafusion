@@ -28,7 +28,7 @@ where
     F::Output: Send,
 {
     let runtime: &Runtime = &get_tokio_runtime(py).0;
-    py.allow_threads(|| runtime.block_on(f))
+    py.detach(|| runtime.block_on(f))
 }
 #[allow(clippy::redundant_async_block)]
 pub fn wait_for_completion<F>(py: Python, fut: F) -> F::Output
@@ -36,7 +36,7 @@ where
     F: Send + Future,
     F::Output: Send,
 {
-    py.allow_threads(|| futures::executor::block_on(async move { fut.await }))
+    py.detach(|| futures::executor::block_on(async move { fut.await }))
 }
 
 pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionError> {

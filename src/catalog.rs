@@ -98,7 +98,7 @@ impl PyDatabase {
 impl PyTable {
     /// Get a reference to the schema for this table
     #[getter]
-    fn schema(&self, py: Python) -> PyResult<PyObject> {
+    fn schema<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.table.schema().to_pyarrow(py)
     }
 

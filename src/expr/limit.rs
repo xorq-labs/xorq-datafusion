@@ -68,7 +68,7 @@ impl PyLimit {
                     if s >= 0 {
                         s as usize
                     } else {
-                        panic!("OFFSET must be >=0, '{}' was provided", s)
+                        panic!("OFFSET must be >=0, '{s}' was provided")
                     }
                 }
                 _ => panic!("Unsupported Expr for OFFSET"),
@@ -107,7 +107,7 @@ impl PyLimit {
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        Ok(format!("Limit({})", self))
+        Ok(format!("Limit({self})"))
     }
 }
 

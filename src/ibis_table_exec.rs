@@ -16,7 +16,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Pla
 use datafusion_common::project_schema;
 use futures::{Stream, TryStreamExt};
 use pyo3::types::PyIterator;
-use pyo3::{Bound, PyAny, PyObject, Python};
+use pyo3::{Bound, PyAny, Python};
 
 use crate::errors::DataFusionError;
 use crate::utils::compute_properties;
@@ -24,7 +24,7 @@ use crate::utils::compute_properties;
 use pyo3::prelude::*;
 
 struct RecordBatchReaderAdapter {
-    record_batch_reader: PyObject,
+    record_batch_reader: Py<PyAny>,
     columns: Option<Vec<String>>,
 }
 
@@ -35,7 +35,7 @@ impl Stream for RecordBatchReaderAdapter {
         thread::scope(|s| {
             let res = s
                 .spawn(move || {
-                    let option = Python::with_gil(|py| {
+                    let option = Python::attach(|py| {
                         let batches = self.record_batch_reader.bind(py);
                         let mut batches = PyIterator::from_object(batches).unwrap();
                         Some(
@@ -69,7 +69,7 @@ impl Stream for RecordBatchReaderAdapter {
 
 #[derive(Debug)]
 pub struct IbisTableExec {
-    record_batch_reader: PyObject,
+    record_batch_reader: Py<PyAny>,
     schema: SchemaRef,
     columns: Option<Vec<String>>,
     cache: PlanProperties,
@@ -155,7 +155,7 @@ impl ExecutionPlan for IbisTableExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> datafusion_common::Result<SendableRecordBatchStream> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let record_batches = RecordBatchReaderAdapter {
                 record_batch_reader: self.record_batch_reader.clone_ref(py),
                 columns: self.columns.clone(),

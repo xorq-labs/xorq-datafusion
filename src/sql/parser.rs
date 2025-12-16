@@ -36,7 +36,7 @@ impl PyContextProvider {
     #[pyo3(signature = (tables, config_options=None))]
     #[new]
     fn new(
-        tables: HashMap<String, PyObject>,
+        tables: HashMap<String, Py<PyAny>>,
         config_options: Option<HashMap<String, String>>,
         py: Python,
     ) -> Self {

@@ -186,11 +186,7 @@ impl PyRecordBatchProviderExec {
 impl DisplayAs for PyRecordBatchProviderExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> std::fmt::Result {
         if let Some(output_ordering) = self.plan_properties.output_ordering() {
-            write!(
-                f,
-                "PyRecordBatchProviderExec ordering=[{}]",
-                output_ordering
-            )
+            write!(f, "PyRecordBatchProviderExec ordering=[{output_ordering}]")
         } else {
             write!(f, "PyRecordBatchProviderExec ordering=[None]")
         }

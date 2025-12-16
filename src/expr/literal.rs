@@ -155,7 +155,7 @@ impl PyLiteral {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    fn into_type(&self, py: Python) -> PyResult<PyObject> {
+    fn into_type(&self, py: Python) -> PyResult<Py<PyAny>> {
         Ok(self
             .clone()
             .into_pyobject(py)
