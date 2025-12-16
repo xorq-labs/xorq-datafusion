@@ -68,8 +68,11 @@ pub fn compute_properties_with_orderings(
     schema: SchemaRef,
     orderings: &[LexOrdering],
 ) -> PlanProperties {
-    let eq_properties =
-        EquivalenceProperties::new_with_orderings(Arc::clone(&schema), orderings.to_vec());
+    let eq_properties = if orderings.is_empty() {
+        EquivalenceProperties::new(Arc::clone(&schema))
+    } else {
+        EquivalenceProperties::new_with_orderings(Arc::clone(&schema), orderings.to_vec())
+    };
 
     PlanProperties::new(
         eq_properties,

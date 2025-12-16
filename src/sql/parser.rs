@@ -77,8 +77,7 @@ impl ContextProvider for PyContextProvider {
         None
     }
 
-    fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        name.to_lowercase().as_str();
+    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
         None
     }
 

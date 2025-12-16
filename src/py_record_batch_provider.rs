@@ -28,7 +28,7 @@ use futures::task::{Context, Poll};
 pub struct PyRecordBatchProvider {
     reader: Arc<Mutex<Option<ArrowArrayStreamReader>>>,
     schema: SchemaRef,
-    ordering: LexOrdering,
+    ordering: Option<LexOrdering>,
 }
 
 impl PyRecordBatchProvider {
@@ -44,7 +44,7 @@ impl PyRecordBatchProvider {
         )))
     }
 
-    pub fn new(aasr: ArrowArrayStreamReader, ordering: LexOrdering) -> Self {
+    pub fn new(aasr: ArrowArrayStreamReader, ordering: Option<LexOrdering>) -> Self {
         let schema = aasr.schema();
         Self {
             reader: Arc::new(Mutex::new(aasr.into())),
@@ -167,10 +167,13 @@ impl PyRecordBatchProviderExec {
     ) -> Self {
         let projected_schema = project_schema(&schema, projections).unwrap();
         let projections = projections.map(|v| (*v).clone());
-        let plan_properties = compute_properties_with_orderings(
-            projected_schema.clone(),
-            &[record_batch_provider.ordering.clone()],
-        );
+        let orderings = if let Some(ordering) = &record_batch_provider.ordering {
+            vec![ordering.clone()]
+        } else {
+            vec![]
+        };
+        let plan_properties =
+            compute_properties_with_orderings(projected_schema.clone(), &orderings);
         Self {
             record_batch_provider,
             projected_schema,
@@ -212,8 +215,7 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
-        // Tell optimizer this operator doesn't reorder its input
-        vec![true]
+        vec![]
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {

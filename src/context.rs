@@ -423,7 +423,9 @@ impl PySessionContext {
                 }
             }
         }
-        let table = PyRecordBatchProvider::new(reader, LexOrdering::new(ordering).unwrap());
+        let ordering_option = LexOrdering::new(ordering);
+
+        let table = PyRecordBatchProvider::new(reader, ordering_option);
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(from_datafusion_error)?;
