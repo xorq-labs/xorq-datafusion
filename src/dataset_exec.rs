@@ -19,12 +19,11 @@ use datafusion::error::{DataFusionError as InnerDataFusionError, Result as DFRes
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::utils::conjunction;
 use datafusion::logical_expr::Expr;
-use datafusion::physical_expr::{EquivalenceProperties, LexOrdering};
+use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
-    SendableRecordBatchStream, Statistics,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
 };
 
 struct PyArrowBatchesAdapter {
@@ -55,8 +54,7 @@ pub(crate) struct DatasetExec {
     fragments: Py<PyList>,
     columns: Option<Vec<String>>,
     filter_expr: Option<Py<PyAny>>,
-    projected_statistics: Statistics,
-    plan_properties: datafusion::physical_plan::PlanProperties,
+    plan_properties: Arc<datafusion::physical_plan::PlanProperties>,
 }
 
 impl DatasetExec {
@@ -96,7 +94,7 @@ impl DatasetExec {
 
         let scanner = dataset.call_method("scanner", (), Some(&kwargs))?;
 
-        let schema = Arc::new(
+        let schema: SchemaRef = Arc::new(
             scanner
                 .getattr("projected_schema")?
                 .extract::<PyArrowType<_>>()?
@@ -113,15 +111,14 @@ impl DatasetExec {
         )?;
 
         let fragments_iter = pylist.call1((fragments_iterator,))?;
-        let fragments = fragments_iter.downcast::<PyList>().map_err(PyErr::from)?;
+        let fragments = fragments_iter.cast::<PyList>().map_err(PyErr::from)?;
 
-        let projected_statistics = Statistics::new_unknown(&schema);
-        let plan_properties = datafusion::physical_plan::PlanProperties::new(
+        let plan_properties = Arc::new(datafusion::physical_plan::PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(fragments.len()),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
 
         Ok(DatasetExec {
             dataset: dataset.clone().unbind(),
@@ -129,7 +126,6 @@ impl DatasetExec {
             fragments: fragments.clone().unbind(),
             columns,
             filter_expr,
-            projected_statistics,
             plan_properties,
         })
     }
@@ -151,7 +147,7 @@ impl ExecutionPlan for DatasetExec {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
+    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
         &self.plan_properties
     }
 
@@ -222,33 +218,6 @@ impl ExecutionPlan for DatasetExec {
             );
             Ok(record_batch_stream)
         })
-    }
-
-    fn statistics(&self) -> DFResult<Statistics> {
-        Ok(self.projected_statistics.clone())
-    }
-}
-
-impl ExecutionPlanProperties for DatasetExec {
-    /// Get the output partitioning of this plan
-    fn output_partitioning(&self) -> &Partitioning {
-        self.plan_properties.output_partitioning()
-    }
-
-    fn output_ordering(&self) -> Option<&LexOrdering> {
-        None
-    }
-
-    fn boundedness(&self) -> Boundedness {
-        self.plan_properties.boundedness
-    }
-
-    fn pipeline_behavior(&self) -> EmissionType {
-        self.plan_properties.emission_type
-    }
-
-    fn equivalence_properties(&self) -> &EquivalenceProperties {
-        &self.plan_properties.eq_properties
     }
 }
 

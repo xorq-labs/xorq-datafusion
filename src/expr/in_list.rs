@@ -19,7 +19,7 @@ use crate::expr::PyExpr;
 use datafusion_expr::Expr;
 use pyo3::prelude::*;
 
-#[pyclass(name = "InList", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "InList", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyInList {
     expr: Box<Expr>,

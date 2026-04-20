@@ -19,7 +19,7 @@ use crate::{common::data_type::PyDataType, expr::PyExpr};
 use datafusion_expr::{Cast, TryCast};
 use pyo3::prelude::*;
 
-#[pyclass(name = "Cast", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Cast", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyCast {
     cast: Cast,
@@ -52,7 +52,7 @@ impl PyCast {
     }
 }
 
-#[pyclass(name = "TryCast", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "TryCast", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyTryCast {
     try_cast: TryCast,

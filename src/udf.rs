@@ -36,7 +36,7 @@ fn to_rust_function(func: Py<PyAny>) -> ScalarFunctionImplementation {
 }
 
 /// Represents a PyScalarUDF
-#[pyclass(name = "ScalarUDF", module = "let", subclass)]
+#[pyclass(from_py_object, name = "ScalarUDF", module = "let", subclass)]
 #[derive(Debug, Clone)]
 pub struct PyScalarUDF {
     pub(crate) function: ScalarUDF,

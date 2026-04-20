@@ -23,7 +23,6 @@ use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::functions::core::expr_ext::FieldAccessor;
 use datafusion::logical_expr::expr::AggregateFunctionParams;
-use datafusion::scalar::ScalarValue;
 use datafusion_expr::{
     col,
     expr::{AggregateFunction, InList, InSubquery, ScalarFunction},
@@ -33,7 +32,7 @@ use datafusion_expr::{
 };
 use sort_expr::PySortExpr;
 
-use crate::common::data_type::{DataTypeMap, RexType};
+use crate::common::data_type::{DataTypeMap, PyScalarValue, RexType};
 use crate::errors::{py_runtime_err, py_type_err, DataFusionError};
 use crate::expr::aggregate_expr::PyAggregateFunction;
 use crate::expr::binary_expr::PyBinaryExpr;
@@ -99,7 +98,7 @@ mod wildcard;
 pub mod window;
 
 /// A PyExpr that can be used on a DataFrame
-#[pyclass(name = "Expr", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Expr", module = "datafusion.expr", subclass)]
 #[derive(Debug, Clone)]
 pub struct PyExpr {
     pub expr: Expr,
@@ -129,8 +128,8 @@ impl PyExpr {
         Python::attach(|_| match &self.expr {
             Expr::Alias(alias) => Ok(PyAlias::new(&alias.expr, &alias.name).into_bound_py_any(py)?),
             Expr::Column(col) => Ok(PyColumn::from(col.clone()).into_bound_py_any(py)?),
-            Expr::ScalarVariable(data_type, variables) => {
-                Ok(PyScalarVariable::new(data_type, variables).into_bound_py_any(py)?)
+            Expr::ScalarVariable(field, variables) => {
+                Ok(PyScalarVariable::new(field.data_type(), variables).into_bound_py_any(py)?)
             }
             Expr::Like(value) => Ok(PyLike::from(value.clone()).into_bound_py_any(py)?),
             Expr::Literal(value, metadata) => Ok(PyLiteral::new_with_metadata(
@@ -239,8 +238,8 @@ impl PyExpr {
     }
 
     #[staticmethod]
-    pub fn literal(value: ScalarValue) -> PyExpr {
-        lit(value).into()
+    pub fn literal(value: PyScalarValue) -> PyExpr {
+        lit(value.0).into()
     }
 
     #[staticmethod]
@@ -304,7 +303,8 @@ impl PyExpr {
             | Expr::Placeholder { .. }
             | Expr::OuterReferenceColumn(_, _)
             | Expr::Unnest(_)
-            | Expr::IsNotUnknown(_) => RexType::Call,
+            | Expr::IsNotUnknown(_)
+            | Expr::SetComparison(_) => RexType::Call,
             Expr::ScalarSubquery(..) => RexType::ScalarSubquery,
             #[allow(deprecated)]
             Expr::Wildcard { .. } => RexType::Call,
@@ -437,7 +437,8 @@ impl PyExpr {
             | Expr::Wildcard { .. }
             | Expr::ScalarSubquery(..)
             | Expr::Placeholder { .. }
-            | Expr::Exists { .. } => Err(py_runtime_err(format!(
+            | Expr::Exists { .. }
+            | Expr::SetComparison(..) => Err(py_runtime_err(format!(
                 "Unimplemented Expr type: {}",
                 self.expr
             ))),
@@ -515,11 +516,10 @@ impl PyExpr {
             #[allow(deprecated)]
             Expr::Wildcard { .. } => {
                 // Since * could be any of the valid column names just return the first one
-                Ok(Arc::new(input_plan.schema().field(0).clone()))
+                Ok(input_plan.schema().field(0).clone())
             }
             _ => {
-                let fields =
-                    exprlist_to_fields(&[expr.clone()], input_plan).map_err(PyErr::from)?;
+                let fields = exprlist_to_fields(&[expr.clone()], input_plan)?;
                 Ok(fields[0].1.clone())
             }
         }
@@ -572,7 +572,8 @@ impl PyExpr {
                 | Operator::AtQuestion
                 | Operator::Question
                 | Operator::QuestionAnd
-                | Operator::QuestionPipe => Err(py_type_err(format!("Unsupported expr: ${op}"))),
+                | Operator::QuestionPipe
+                | Operator::Colon => Err(py_type_err(format!("Unsupported expr: ${op}"))),
             },
             Expr::Cast(Cast { expr: _, data_type }) => DataTypeMap::map_from_arrow_type(data_type),
             Expr::Literal(scalar_value, _) => DataTypeMap::map_from_scalar_value(scalar_value),

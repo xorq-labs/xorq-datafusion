@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 
 use super::subquery::PySubquery;
 
-#[pyclass(name = "Exists", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Exists", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyExists {
     subquery: Subquery,

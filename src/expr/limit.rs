@@ -25,7 +25,7 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use std::fmt::{self, Display, Formatter};
 
-#[pyclass(name = "Limit", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Limit", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyLimit {
     limit: Limit,

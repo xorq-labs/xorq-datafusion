@@ -20,7 +20,7 @@ use datafusion_expr::expr::Between;
 use pyo3::prelude::*;
 use std::fmt::{self, Display, Formatter};
 
-#[pyclass(name = "Between", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Between", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyBetween {
     between: Between,

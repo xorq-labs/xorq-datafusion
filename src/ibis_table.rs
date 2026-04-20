@@ -31,7 +31,7 @@ impl IbisTable {
     pub fn new(ibis_table: &Bound<'_, PyAny>, py: Python) -> PyResult<Self> {
         let pa = PyModule::import(py, "ibis.expr.types")?;
         let table = pa.getattr("Table")?;
-        let table_type = table.downcast::<PyType>()?;
+        let table_type = table.cast::<PyType>()?;
 
         if ibis_table.is_instance(table_type)? {
             Ok(IbisTable {

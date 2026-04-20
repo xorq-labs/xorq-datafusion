@@ -24,7 +24,12 @@ use pyo3::IntoPyObjectExt;
 use super::logical_node::LogicalNode;
 use crate::{errors::py_type_err, sql::logical::PyLogicalPlan};
 
-#[pyclass(name = "CreateView", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "CreateView",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyCreateView {
     create: CreateView,

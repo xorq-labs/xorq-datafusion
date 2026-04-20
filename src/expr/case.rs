@@ -19,7 +19,7 @@ use crate::expr::PyExpr;
 use datafusion_expr::Case;
 use pyo3::prelude::*;
 
-#[pyclass(name = "Case", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Case", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyCase {
     case: Case,

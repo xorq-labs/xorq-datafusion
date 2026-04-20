@@ -1,14 +1,12 @@
 use std::any::Any;
-use std::ops::DerefMut;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::{fmt, thread};
+use std::fmt;
+use std::sync::Arc;
 
 use crate::utils::compute_properties_with_orderings;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
-use datafusion::arrow::record_batch::{RecordBatch, RecordBatchReader};
+use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result;
@@ -21,17 +19,32 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::DataFusionError;
 use datafusion_expr::Expr;
-use futures::stream::Stream;
-use futures::task::{Context, Poll};
+use pyo3::prelude::*;
 
+/// A [`TableProvider`] backed by a Python object that supports the Arrow C stream
+/// interface (`__arrow_c_stream__`).
+///
+/// The Python object is held by reference and re-queried on every `execute()` call,
+/// so tables that support multiple calls to `__arrow_c_stream__` (e.g. `pyarrow.Table`)
+/// can be scanned more than once.  Single-use readers (e.g. `pyarrow.RecordBatchReader`)
+/// will raise a Python error on the second call, which surfaces as a `DataFusionError`
+/// rather than silently returning empty results.
 #[derive(Clone, Debug)]
 pub struct PyRecordBatchProvider {
-    reader: Arc<Mutex<Option<ArrowArrayStreamReader>>>,
+    py_object: Arc<Py<PyAny>>,
     schema: SchemaRef,
     ordering: Option<LexOrdering>,
 }
 
 impl PyRecordBatchProvider {
+    pub fn new(py_object: Py<PyAny>, schema: SchemaRef, ordering: Option<LexOrdering>) -> Self {
+        Self {
+            py_object: Arc::new(py_object),
+            schema,
+            ordering,
+        }
+    }
+
     pub(crate) async fn create_physical_plan(
         &self,
         projections: Option<&Vec<usize>>,
@@ -42,15 +55,6 @@ impl PyRecordBatchProvider {
             projections,
             schema,
         )))
-    }
-
-    pub fn new(aasr: ArrowArrayStreamReader, ordering: Option<LexOrdering>) -> Self {
-        let schema = aasr.schema();
-        Self {
-            reader: Arc::new(Mutex::new(aasr.into())),
-            schema,
-            ordering,
-        }
     }
 }
 
@@ -79,84 +83,12 @@ impl TableProvider for PyRecordBatchProvider {
     }
 }
 
-impl Stream for PyRecordBatchProvider {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.reader.lock().unwrap().deref_mut() {
-            Some(ref mut reader) => thread::scope(|s| {
-                let res = s
-                    .spawn(move || match reader.next() {
-                        Some(value) => Poll::Ready(Some(value)).map_err(DataFusionError::from),
-                        None => Poll::Ready(None),
-                    })
-                    .join();
-
-                match res {
-                    Ok(val) => val,
-                    _ => Poll::Ready(None),
-                }
-            }),
-            _ => Poll::Ready(None),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ProjectedPyRecordBatchProvider {
-    record_batch_provider: PyRecordBatchProvider,
-    projections: Vec<usize>,
-}
-
-impl ProjectedPyRecordBatchProvider {
-    fn new(record_batch_provider: PyRecordBatchProvider, projections: Vec<usize>) -> Self {
-        let projections = projections.clone();
-        Self {
-            record_batch_provider,
-            projections,
-        }
-    }
-}
-
-impl Stream for ProjectedPyRecordBatchProvider {
-    type Item = Result<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let projections = self.projections.clone();
-        match self
-            .record_batch_provider
-            .reader
-            .lock()
-            .unwrap()
-            .deref_mut()
-        {
-            Some(ref mut reader) => thread::scope(|s| {
-                let res = s
-                    .spawn(move || match reader.next() {
-                        Some(value) => Poll::Ready(Some(
-                            value.map(|rb| rb.project(projections.as_slice()).unwrap()),
-                        ))
-                        .map_err(DataFusionError::from),
-                        None => Poll::Ready(None),
-                    })
-                    .join();
-
-                match res {
-                    Ok(val) => val,
-                    _ => Poll::Ready(None),
-                }
-            }),
-            _ => Poll::Ready(None),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct PyRecordBatchProviderExec {
     record_batch_provider: PyRecordBatchProvider,
     projected_schema: SchemaRef,
     projections: Option<Vec<usize>>,
-    plan_properties: PlanProperties,
+    plan_properties: Arc<PlanProperties>,
 }
 
 impl PyRecordBatchProviderExec {
@@ -206,7 +138,7 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
         self.projected_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.plan_properties
     }
 
@@ -225,28 +157,66 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
         Ok(self)
     }
 
+    /// Acquire a fresh stream from Python and return it as a lazy async stream.
+    ///
+    /// Each batch is fetched inside `spawn_blocking` so that the Arrow C-callback
+    /// invocations (which may need the GIL) never block the Tokio executor thread.
+    /// Only one batch is in flight at a time; the full dataset is never materialised.
     fn execute(
         &self,
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let record_batch_provider = self.record_batch_provider.clone();
         let projections = self.projections.clone();
         let projected_schema = self.projected_schema.clone();
 
-        let record_batch_stream: SendableRecordBatchStream = if let Some(pj) = projections {
-            let record_batch_provider =
-                ProjectedPyRecordBatchProvider::new(record_batch_provider.clone(), pj.clone());
-            Box::pin(RecordBatchStreamAdapter::new(
-                projected_schema.clone(),
-                record_batch_provider,
-            ))
-        } else {
-            Box::pin(RecordBatchStreamAdapter::new(
-                projected_schema.clone(),
-                record_batch_provider,
-            ))
-        };
-        Ok(record_batch_stream)
+        let reader = Python::attach(|py| {
+            self.record_batch_provider
+                .py_object
+                .bind(py)
+                .extract::<PyArrowType<ArrowArrayStreamReader>>()
+                .map(|t| t.0)
+                .map_err(|e| DataFusionError::External(Box::new(e)))
+        })?;
+
+        // Drive the sync reader one batch at a time from a blocking thread so we
+        // never stall the async executor.  The reader is moved into the unfold state
+        // and is held for the lifetime of the stream.
+        let stream = futures::stream::unfold(Some(reader), move |state| {
+            let projections = projections.clone();
+            async move {
+                let mut reader = state?;
+                let result = tokio::task::spawn_blocking(move || {
+                    // Acquire the GIL for each batch: the C callbacks registered by
+                    // PyArrow may call back into Python for non-in-memory sources.
+                    let batch = Python::attach(|_py| reader.next());
+                    (batch, reader)
+                })
+                .await;
+
+                match result {
+                    Ok((None, _)) => None,
+                    Ok((Some(batch_result), reader)) => {
+                        let item = batch_result.map_err(DataFusionError::from).and_then(|rb| {
+                            match &projections {
+                                Some(pj) => {
+                                    rb.project(pj.as_slice()).map_err(DataFusionError::from)
+                                }
+                                None => Ok(rb),
+                            }
+                        });
+                        Some((item, Some(reader)))
+                    }
+                    Err(join_err) => {
+                        Some((Err(DataFusionError::External(Box::new(join_err))), None))
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            projected_schema,
+            stream,
+        )))
     }
 }

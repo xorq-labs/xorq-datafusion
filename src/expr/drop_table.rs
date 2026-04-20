@@ -24,7 +24,12 @@ use pyo3::IntoPyObjectExt;
 
 use super::logical_node::LogicalNode;
 
-#[pyclass(name = "DropTable", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "DropTable",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyDropTable {
     drop: DropTable,

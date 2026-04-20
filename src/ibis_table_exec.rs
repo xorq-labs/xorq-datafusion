@@ -72,7 +72,7 @@ pub struct IbisTableExec {
     record_batch_reader: Py<PyAny>,
     schema: SchemaRef,
     columns: Option<Vec<String>>,
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl IbisTableExec {
@@ -134,7 +134,7 @@ impl ExecutionPlan for IbisTableExec {
         self.schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

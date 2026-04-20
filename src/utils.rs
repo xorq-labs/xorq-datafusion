@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::SchemaRef;
@@ -13,12 +13,16 @@ use pyo3::prelude::*;
 use tokio::runtime::Runtime;
 
 use crate::errors::DataFusionError;
-use crate::TokioRuntime;
 
 /// Utility to get the Tokio Runtime from Python
-pub(crate) fn get_tokio_runtime(py: Python) -> PyRef<TokioRuntime> {
-    let datafusion = py.import("xorq_datafusion._internal").unwrap();
-    datafusion.getattr("runtime").unwrap().extract().unwrap()
+pub fn get_tokio_runtime() -> &'static Runtime {
+    // NOTE: Other pyo3 Python libraries have had issues with using tokio
+    // behind a forking app-server like `gunicorn`
+    // If we run into that problem, in the future we can look to `delta-rs`
+    // which adds a check in that disallows calls from a forked process
+    // https://github.com/delta-io/delta-rs/blob/87010461cfe01563d91a4b9cd6fa468e2ad5f283/python/src/utils.rs#L10-L31
+    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| Runtime::new().unwrap())
 }
 
 /// Utility to collect rust futures with GIL released
@@ -27,7 +31,7 @@ where
     F: Send + Future,
     F::Output: Send,
 {
-    let runtime: &Runtime = &get_tokio_runtime(py).0;
+    let runtime: &Runtime = get_tokio_runtime();
     py.detach(|| runtime.block_on(f))
 }
 #[allow(clippy::redundant_async_block)]
@@ -53,33 +57,33 @@ pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionErro
     })
 }
 
-pub fn compute_properties(schema: SchemaRef) -> PlanProperties {
+pub fn compute_properties(schema: SchemaRef) -> Arc<PlanProperties> {
     let eq_properties = EquivalenceProperties::new(schema);
 
-    PlanProperties::new(
+    Arc::new(PlanProperties::new(
         eq_properties,
         Partitioning::UnknownPartitioning(1),
         EmissionType::Incremental,
         Boundedness::Bounded,
-    )
+    ))
 }
 
 pub fn compute_properties_with_orderings(
     schema: SchemaRef,
     orderings: &[LexOrdering],
-) -> PlanProperties {
+) -> Arc<PlanProperties> {
     let eq_properties = if orderings.is_empty() {
         EquivalenceProperties::new(Arc::clone(&schema))
     } else {
         EquivalenceProperties::new_with_orderings(Arc::clone(&schema), orderings.to_vec())
     };
 
-    PlanProperties::new(
+    Arc::new(PlanProperties::new(
         eq_properties,
         Partitioning::UnknownPartitioning(1),
         EmissionType::Incremental,
         Boundedness::Bounded,
-    )
+    ))
 }
 
 pub fn make_scalar_function<F>(inner: F) -> ScalarFunctionImplementation

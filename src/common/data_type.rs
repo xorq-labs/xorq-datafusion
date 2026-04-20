@@ -37,7 +37,13 @@ impl From<PyScalarValue> for ScalarValue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(eq, eq_int, name = "RexType", module = "datafusion.common")]
+#[pyclass(
+    from_py_object,
+    eq,
+    eq_int,
+    name = "RexType",
+    module = "datafusion.common"
+)]
 pub enum RexType {
     Alias,
     Literal,
@@ -57,7 +63,12 @@ pub enum RexType {
 /// to map those types and provide a simple place for developers
 /// to map types from one system to another.
 #[derive(Debug, Clone)]
-#[pyclass(name = "DataTypeMap", module = "datafusion.common", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "DataTypeMap",
+    module = "datafusion.common",
+    subclass
+)]
 pub struct DataTypeMap {
     #[pyo3(get, set)]
     pub arrow_type: PyDataType,
@@ -623,7 +634,7 @@ impl DataTypeMap {
 /// Since `DataType` exists in another package we cannot make that happen here so we wrap
 /// `DataType` as `PyDataType` This exists solely to satisfy those constraints.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(name = "DataType", module = "datafusion.common")]
+#[pyclass(from_py_object, name = "DataType", module = "datafusion.common")]
 pub struct PyDataType {
     pub data_type: DataType,
 }
@@ -708,7 +719,13 @@ impl From<DataType> for PyDataType {
 
 /// Represents the possible Python types that can be mapped to the SQL types
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(eq, eq_int, name = "PythonType", module = "datafusion.common")]
+#[pyclass(
+    from_py_object,
+    eq,
+    eq_int,
+    name = "PythonType",
+    module = "datafusion.common"
+)]
 pub enum PythonType {
     Array,
     Bool,
@@ -728,7 +745,13 @@ pub enum PythonType {
 #[allow(non_camel_case_types)]
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[pyclass(eq, eq_int, name = "SqlType", module = "datafusion.common")]
+#[pyclass(
+    from_py_object,
+    eq,
+    eq_int,
+    name = "SqlType",
+    module = "datafusion.common"
+)]
 pub enum SqlType {
     ANY,
     ARRAY,

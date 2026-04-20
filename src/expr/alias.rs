@@ -21,7 +21,7 @@ use std::fmt::{self, Display, Formatter};
 
 use datafusion_expr::Expr;
 
-#[pyclass(name = "Alias", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Alias", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyAlias {
     expr: PyExpr,
