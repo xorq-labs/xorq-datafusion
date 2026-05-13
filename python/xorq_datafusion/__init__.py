@@ -17,12 +17,17 @@ from xorq_datafusion._internal import (
     Table,
     TableProvider,
     WindowUDF,
+    runtime as _runtime,
 )
 
 try:
     import importlib.metadata as importlib_metadata
 except ModuleNotFoundError:
     import importlib_metadata
+
+
+def close(timeout_secs=None):
+    _runtime.shutdown(timeout_secs)
 
 
 __all__ = [
@@ -44,6 +49,7 @@ __all__ = [
     "DataFrame",
     "WindowUDF",
     "WindowEvaluator",
+    "close",
 ]
 
 

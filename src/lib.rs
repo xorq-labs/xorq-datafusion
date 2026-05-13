@@ -32,10 +32,23 @@ pub mod utils;
 
 mod object_storage;
 
+/// Handle to the process-wide tokio runtime, exposed so Python can shut it
+/// down before sys.exit() to avoid a Py_Finalize / blocking-pool deadlock.
+#[pyclass(name = "TokioRuntime", module = "xorq_datafusion._internal")]
+struct TokioRuntime;
+
+#[pymethods]
+impl TokioRuntime {
+    fn shutdown(&self, timeout_secs: Option<u64>) {
+        crate::utils::shutdown_runtime(timeout_secs);
+    }
+}
+
 /// Low-level xorq internal package.
 #[pymodule]
 fn _internal(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
-    // Register the Tokio Runtime as a module attribute, so we can reuse it
+    m.add_class::<TokioRuntime>()?;
+    m.add("runtime", pyo3::Py::new(py, TokioRuntime {})?)?;
 
     m.add_class::<context::PySessionConfig>()?;
     m.add_class::<context::PySessionContext>()?;
