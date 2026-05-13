@@ -1,7 +1,12 @@
 use datafusion_common::TableReference;
 use pyo3::{pyclass, pymethods, PyResult};
 
-#[pyclass(name = "Wildcard", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "Wildcard",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyWildcard {
     qualifier: Option<String>,

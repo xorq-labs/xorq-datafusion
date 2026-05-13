@@ -204,7 +204,7 @@ pub fn to_rust_partition_evaluator(evaluator: Py<PyAny>) -> PartitionEvaluatorFa
 }
 
 /// Represents an WindowUDF
-#[pyclass(name = "WindowUDF", module = "let", subclass)]
+#[pyclass(from_py_object, name = "WindowUDF", module = "let", subclass)]
 #[derive(Debug, Clone)]
 pub struct PyWindowUDF {
     pub(crate) function: WindowUDF,

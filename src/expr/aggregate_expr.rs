@@ -20,7 +20,12 @@ use datafusion_expr::expr::AggregateFunction;
 use pyo3::prelude::*;
 use std::fmt::{Display, Formatter};
 
-#[pyclass(name = "AggregateFunction", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "AggregateFunction",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyAggregateFunction {
     aggr: AggregateFunction,

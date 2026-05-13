@@ -12,7 +12,7 @@ use pyo3::prelude::PyModule;
 use pyo3::prelude::*;
 use pyo3::{pyclass, pyfunction, pymethods, wrap_pyfunction, PyResult, Python};
 
-#[pyclass(name = "Optimizer", module = "let", subclass)]
+#[pyclass(from_py_object, name = "Optimizer", module = "let", subclass)]
 #[derive(Clone, Default)]
 pub struct PyOptimizer {
     pub optimizer: Arc<Optimizer>,
@@ -82,7 +82,7 @@ impl OptimizerRule for PyOptimizerRule {
     }
 }
 
-#[pyclass(name = "OptimizerContext", module = "let", subclass)]
+#[pyclass(from_py_object, name = "OptimizerContext", module = "let", subclass)]
 #[derive(Clone, Default)]
 pub struct PyOptimizerContext {
     pub(crate) context: Arc<OptimizerContext>,

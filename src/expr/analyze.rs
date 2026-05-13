@@ -24,7 +24,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::sql::logical::PyLogicalPlan;
 
-#[pyclass(name = "Analyze", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Analyze", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyAnalyze {
     analyze: Analyze,

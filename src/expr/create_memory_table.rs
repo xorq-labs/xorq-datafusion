@@ -24,7 +24,12 @@ use pyo3::IntoPyObjectExt;
 
 use super::logical_node::LogicalNode;
 
-#[pyclass(name = "CreateMemoryTable", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "CreateMemoryTable",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyCreateMemoryTable {
     create: CreateMemoryTable,

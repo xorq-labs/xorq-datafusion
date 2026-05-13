@@ -24,13 +24,23 @@ use pyo3::IntoPyObjectExt;
 use super::{logical_node::LogicalNode, PyExpr};
 use crate::{errors::py_type_err, sql::logical::PyLogicalPlan};
 
-#[pyclass(name = "Repartition", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "Repartition",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyRepartition {
     repartition: Repartition,
 }
 
-#[pyclass(name = "Partitioning", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "Partitioning",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyPartitioning {
     partitioning: Partitioning,

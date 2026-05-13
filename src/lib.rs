@@ -32,18 +32,10 @@ pub mod utils;
 
 mod object_storage;
 
-// Used to define Tokio Runtime as a Python module attribute
-#[pyclass]
-pub(crate) struct TokioRuntime(tokio::runtime::Runtime);
-
 /// Low-level xorq internal package.
 #[pymodule]
 fn _internal(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
     // Register the Tokio Runtime as a module attribute, so we can reuse it
-    m.add(
-        "runtime",
-        TokioRuntime(tokio::runtime::Runtime::new().unwrap()),
-    )?;
 
     m.add_class::<context::PySessionConfig>()?;
     m.add_class::<context::PySessionContext>()?;

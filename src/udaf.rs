@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use pyo3::{prelude::*, types::PyTuple};
 
+use crate::common::data_type::PyScalarValue;
 use crate::errors::to_external_err;
 use crate::expr::PyExpr;
 use crate::utils::parse_volatility;
@@ -44,8 +45,11 @@ impl Accumulator for RustAccumulator {
     }
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
-        Python::attach(|py| self.accum.bind(py).call_method0("evaluate")?.extract())
-            .map_err(to_external_err)
+        Python::attach(|py| {
+            let result = self.accum.bind(py).call_method0("evaluate")?;
+            result.extract::<PyScalarValue>().map(|sv| sv.0)
+        })
+        .map_err(to_external_err)
     }
 
     fn size(&self) -> usize {
@@ -53,8 +57,13 @@ impl Accumulator for RustAccumulator {
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        Python::attach(|py| self.accum.bind(py).call_method0("state")?.extract())
-            .map_err(to_external_err)
+        Python::attach(|py| {
+            let result = self.accum.bind(py).call_method0("state")?;
+            result
+                .extract::<Vec<PyScalarValue>>()
+                .map(|v| v.into_iter().map(|sv| sv.0).collect())
+        })
+        .map_err(to_external_err)
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
@@ -111,7 +120,7 @@ pub fn to_rust_accumulator(accum: Py<PyAny>) -> AccumulatorFactoryFunction {
 }
 
 /// Represents an AggregateUDF
-#[pyclass(name = "AggregateUDF", module = "let", subclass)]
+#[pyclass(from_py_object, name = "AggregateUDF", module = "let", subclass)]
 #[derive(Debug, Clone)]
 pub struct PyAggregateUDF {
     pub(crate) function: AggregateUDF,

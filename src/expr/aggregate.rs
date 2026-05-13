@@ -28,7 +28,12 @@ use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use std::fmt::{self, Display, Formatter};
 
-#[pyclass(name = "Aggregate", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "Aggregate",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyAggregate {
     aggregate: Aggregate,

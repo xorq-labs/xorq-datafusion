@@ -22,7 +22,12 @@ use pyo3::IntoPyObjectExt;
 
 use super::logical_node::LogicalNode;
 
-#[pyclass(name = "Extension", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "Extension",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyExtension {
     pub node: Extension,

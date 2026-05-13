@@ -25,7 +25,12 @@ use datafusion_expr::utils::split_conjunction;
 
 use super::{data_type::DataTypeMap, function::SqlFunction};
 
-#[pyclass(name = "SqlSchema", module = "datafusion.common", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "SqlSchema",
+    module = "datafusion.common",
+    subclass
+)]
 #[derive(Debug, Clone)]
 pub struct SqlSchema {
     #[pyo3(get, set)]
@@ -38,7 +43,12 @@ pub struct SqlSchema {
     pub functions: Vec<SqlFunction>,
 }
 
-#[pyclass(name = "SqlTable", module = "datafusion.common", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "SqlTable",
+    module = "datafusion.common",
+    subclass
+)]
 #[derive(Debug, Clone)]
 pub struct SqlTable {
     #[pyo3(get, set)]
@@ -82,7 +92,12 @@ impl SqlTable {
     }
 }
 
-#[pyclass(name = "SqlView", module = "datafusion.common", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "SqlView",
+    module = "datafusion.common",
+    subclass
+)]
 #[derive(Debug, Clone)]
 pub struct SqlView {
     #[pyo3(get, set)]
@@ -200,7 +215,12 @@ fn is_supported_push_down_expr(_expr: &Expr) -> bool {
     true
 }
 
-#[pyclass(name = "SqlStatistics", module = "datafusion.common", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "SqlStatistics",
+    module = "datafusion.common",
+    subclass
+)]
 #[derive(Debug, Clone)]
 pub struct SqlStatistics {
     row_count: f64,

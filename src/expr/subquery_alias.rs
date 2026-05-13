@@ -24,7 +24,12 @@ use pyo3::IntoPyObjectExt;
 use super::logical_node::LogicalNode;
 use crate::{common::df_schema::PyDFSchema, sql::logical::PyLogicalPlan};
 
-#[pyclass(name = "SubqueryAlias", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "SubqueryAlias",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PySubqueryAlias {
     subquery_alias: SubqueryAlias,

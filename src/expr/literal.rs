@@ -15,12 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::errors::to_external_err;
 use datafusion::{common::ScalarValue, logical_expr::expr::FieldMetadata};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-#[pyclass(name = "Literal", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Literal", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyLiteral {
     pub value: ScalarValue,
@@ -156,12 +155,7 @@ impl PyLiteral {
 
     #[allow(clippy::wrong_self_convention)]
     fn into_type(&self, py: Python) -> PyResult<Py<PyAny>> {
-        Ok(self
-            .clone()
-            .into_pyobject(py)
-            .map_err(to_external_err)?
-            .into_any()
-            .unbind())
+        Ok(self.clone().into_pyobject(py)?.into_any().unbind())
     }
 
     fn __repr__(&self) -> PyResult<String> {

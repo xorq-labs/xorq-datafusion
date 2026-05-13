@@ -19,7 +19,12 @@ use crate::expr::PyExpr;
 use datafusion_expr::BinaryExpr;
 use pyo3::prelude::*;
 
-#[pyclass(name = "BinaryExpr", module = "datafusion.expr", subclass)]
+#[pyclass(
+    from_py_object,
+    name = "BinaryExpr",
+    module = "datafusion.expr",
+    subclass
+)]
 #[derive(Clone)]
 pub struct PyBinaryExpr {
     expr: BinaryExpr,

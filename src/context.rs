@@ -15,10 +15,8 @@ use crate::udaf::PyAggregateUDF;
 use crate::udf::PyScalarUDF;
 use crate::udwf::PyWindowUDF;
 use crate::utils::wait_for_future;
-use arrow::array::RecordBatchReader;
 use arrow_ord::sort::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Schema};
-use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
@@ -35,7 +33,7 @@ use datafusion_common::config::ConfigFileType;
 use datafusion_common::{exec_err, ScalarValue, TableReference};
 use datafusion_expr::Expr;
 use datafusion_expr::ScalarUDF;
-use object_store::{Error, ObjectMeta, ObjectStore, ObjectStoreScheme};
+use object_store::{Error, GetOptions, ObjectMeta, ObjectStoreScheme};
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -47,7 +45,7 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 /// Configuration options for a SessionContext
-#[pyclass(name = "SessionConfig", module = "let", subclass)]
+#[pyclass(from_py_object, name = "SessionConfig", module = "let", subclass)]
 #[derive(Clone, Default)]
 pub(crate) struct PySessionConfig {
     pub(crate) config: SessionConfig,
@@ -139,7 +137,7 @@ impl PySessionConfig {
     }
 }
 
-#[pyclass(name = "SessionState", module = "let", subclass)]
+#[pyclass(from_py_object, name = "SessionState", module = "let", subclass)]
 #[derive(Clone)]
 pub(crate) struct PySessionState {
     pub(crate) session_state: SessionState,
@@ -187,7 +185,7 @@ impl PySessionState {
 /// `PySessionContext` is able to plan and execute DataFusion plans.
 /// It has a powerful optimizer, a physical planner for local execution, and a
 /// multithreaded execution engine to perform the execution.
-#[pyclass(name = "SessionContext", module = "let", subclass)]
+#[pyclass(from_py_object, name = "SessionContext", module = "let", subclass)]
 #[derive(Clone)]
 pub(crate) struct PySessionContext {
     pub(crate) ctx: SessionContext,
@@ -202,7 +200,7 @@ impl PySessionContext {
         config: Option<PySessionConfig>,
     ) -> PyResult<Self> {
         let runtime_config = RuntimeEnvBuilder::default();
-        let runtime = Arc::new(runtime_config.build()?);
+        let runtime = Arc::new(runtime_config.build().map_err(from_datafusion_error)?);
         let session_state = match (session_state, config) {
             (Some(s), _) => s.session_state,
             (None, Some(c)) => SessionStateBuilder::new()
@@ -378,7 +376,7 @@ impl PySessionContext {
         partitions: PyArrowType<Vec<Vec<RecordBatch>>>,
     ) -> PyResult<()> {
         let schema = partitions.0[0][0].schema();
-        let table = MemTable::try_new(schema, partitions.0)?;
+        let table = MemTable::try_new(schema, partitions.0).map_err(from_datafusion_error)?;
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(from_datafusion_error)?;
@@ -391,11 +389,17 @@ impl PySessionContext {
     pub fn register_record_batch_reader(
         &mut self,
         name: &str,
-        reader: PyArrowType<ArrowArrayStreamReader>,
+        reader: Bound<'_, PyAny>,
         sort_order: Option<Vec<PySortExpr>>,
     ) -> PyResult<()> {
-        let reader = reader.0;
-        let schema = reader.schema();
+        // Extract the schema from the Python object's .schema attribute so that we
+        // do not consume the stream here — it will be re-acquired on each execute().
+        let schema: Arc<Schema> = Arc::new(
+            reader
+                .getattr("schema")?
+                .extract::<PyArrowType<Schema>>()?
+                .0,
+        );
 
         let mut ordering = vec![];
         if let Some(exprs) = sort_order {
@@ -421,7 +425,7 @@ impl PySessionContext {
         }
         let ordering_option = LexOrdering::new(ordering);
 
-        let table = PyRecordBatchProvider::new(reader, ordering_option);
+        let table = PyRecordBatchProvider::new(reader.unbind(), schema, ordering_option);
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(from_datafusion_error)?;
@@ -505,11 +509,13 @@ impl PySessionContext {
     }
 
     fn table_exist(&self, name: &str) -> PyResult<bool> {
-        Ok(self.ctx.table_exist(name)?)
+        self.ctx.table_exist(name).map_err(from_datafusion_error)
     }
 
     fn empty_table(&self) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.ctx.read_empty()?))
+        Ok(PyDataFrame::new(
+            self.ctx.read_empty().map_err(from_datafusion_error)?,
+        ))
     }
 
     fn session_id(&self) -> String {
@@ -552,7 +558,7 @@ impl PySessionContext {
         let location = &path.to_string();
 
         // Parse the location URL to extract the scheme and other components
-        let table_path = ListingTableUrl::parse(location)?;
+        let table_path = ListingTableUrl::parse(location).map_err(from_datafusion_error)?;
 
         // Extract the scheme (e.g., "s3", "gcs") from the parsed URL
         let scheme = table_path.scheme();
@@ -591,7 +597,9 @@ impl PySessionContext {
         }
 
         if let "s3" | "oss" | "cos" | "gs" | "gcs" = scheme {
-            table_options.alter_with_string_hash_map(&storage_options)?;
+            table_options
+                .alter_with_string_hash_map(&storage_options)
+                .map_err(from_datafusion_error)?;
         }
 
         let result = async {
@@ -603,7 +611,10 @@ impl PySessionContext {
                     source: format!("Source: {e}").into(),
                 })?;
             let (_, object_path) = ObjectStoreScheme::parse(url)?;
-            store.head(&object_path).await
+            store
+                .get_opts(&object_path, GetOptions::new().with_head(true))
+                .await
+                .map(|r| r.meta)
         };
 
         let metadata =

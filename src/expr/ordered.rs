@@ -4,7 +4,7 @@ use std::clone::Clone;
 
 use crate::expr::PyExpr;
 
-#[pyclass(name = "Ordered", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Ordered", module = "datafusion.expr", subclass)]
 #[derive(Clone, Debug)]
 pub struct PyOrdered {
     pub expr: PyExpr,

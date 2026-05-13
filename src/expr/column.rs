@@ -18,7 +18,7 @@
 use datafusion_common::Column;
 use pyo3::prelude::*;
 
-#[pyclass(name = "Column", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Column", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyColumn {
     pub col: Column,

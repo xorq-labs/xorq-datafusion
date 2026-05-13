@@ -24,7 +24,7 @@ use pyo3::IntoPyObjectExt;
 use super::logical_node::LogicalNode;
 use crate::{common::df_schema::PyDFSchema, errors::py_type_err, sql::logical::PyLogicalPlan};
 
-#[pyclass(name = "Explain", module = "datafusion.expr", subclass)]
+#[pyclass(from_py_object, name = "Explain", module = "datafusion.expr", subclass)]
 #[derive(Clone)]
 pub struct PyExplain {
     explain: Explain,
