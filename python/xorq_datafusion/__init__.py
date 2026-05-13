@@ -1,3 +1,4 @@
+import atexit
 from abc import ABCMeta, abstractmethod
 from typing import List
 
@@ -29,6 +30,8 @@ except ModuleNotFoundError:
 def close(timeout_secs=None):
     _runtime.shutdown(timeout_secs)
 
+
+atexit.register(close)
 
 __all__ = [
     "SessionContext",
