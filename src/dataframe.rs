@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use crate::errors::{from_datafusion_error, py_datafusion_err};
 use crate::physical_plan::PyExecutionPlan;
 use crate::record_batch::PyRecordBatchStream;
-use crate::utils::{get_tokio_runtime, wait_for_completion, wait_for_future};
+use crate::utils::{get_tokio_handle, wait_for_completion, wait_for_future};
 use pyo3::pybacked::PyBackedStr;
 use pyo3::IntoPyObjectExt;
 
@@ -372,22 +372,17 @@ impl PyDataFrame {
     }
 
     fn execute_stream(&self, py: Python) -> PyResult<PyRecordBatchStream> {
-        // create a Tokio runtime to run the async code
-        let rt = &get_tokio_runtime();
         let df = self.df.as_ref().clone();
-
-        let fut: JoinHandle<PyResult<SendableRecordBatchStream>> =
-            rt.spawn(async move { df.execute_stream().map_err(from_datafusion_error).await });
+        let fut: JoinHandle<PyResult<SendableRecordBatchStream>> = get_tokio_handle()
+            .spawn(async move { df.execute_stream().map_err(from_datafusion_error).await });
         let stream = wait_for_completion(py, fut).map_err(py_datafusion_err)?;
         Ok(PyRecordBatchStream::new(stream?))
     }
 
     fn execute_stream_partitioned(&self, py: Python) -> PyResult<Vec<PyRecordBatchStream>> {
-        // create a Tokio runtime to run the async code
-        let rt = &get_tokio_runtime();
         let df = self.df.as_ref().clone();
         let fut: JoinHandle<datafusion_common::Result<Vec<SendableRecordBatchStream>>> =
-            rt.spawn(async move { df.execute_stream_partitioned().await });
+            get_tokio_handle().spawn(async move { df.execute_stream_partitioned().await });
         let stream = wait_for_future(py, fut).map_err(py_datafusion_err)?;
 
         match stream {

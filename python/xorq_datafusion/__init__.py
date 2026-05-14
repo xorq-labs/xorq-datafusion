@@ -1,3 +1,4 @@
+import atexit
 from abc import ABCMeta, abstractmethod
 from typing import List
 
@@ -17,6 +18,7 @@ from xorq_datafusion._internal import (
     Table,
     TableProvider,
     WindowUDF,
+    runtime as _runtime,
 )
 
 try:
@@ -24,6 +26,12 @@ try:
 except ModuleNotFoundError:
     import importlib_metadata
 
+
+def close(timeout_secs=None):
+    _runtime.shutdown(timeout_secs)
+
+
+atexit.register(close)
 
 __all__ = [
     "SessionContext",
@@ -44,6 +52,7 @@ __all__ = [
     "DataFrame",
     "WindowUDF",
     "WindowEvaluator",
+    "close",
 ]
 
 

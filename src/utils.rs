@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use arrow::array::ArrayRef;
 use arrow::datatypes::SchemaRef;
@@ -10,19 +10,41 @@ use datafusion_common::{Result, ScalarValue};
 use datafusion_expr::Volatility;
 use datafusion_expr::{ColumnarValue, ScalarFunctionImplementation};
 use pyo3::prelude::*;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 
 use crate::errors::DataFusionError;
 
-/// Utility to get the Tokio Runtime from Python
-pub fn get_tokio_runtime() -> &'static Runtime {
-    // NOTE: Other pyo3 Python libraries have had issues with using tokio
-    // behind a forking app-server like `gunicorn`
-    // If we run into that problem, in the future we can look to `delta-rs`
-    // which adds a check in that disallows calls from a forked process
-    // https://github.com/delta-io/delta-rs/blob/87010461cfe01563d91a4b9cd6fa468e2ad5f283/python/src/utils.rs#L10-L31
-    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| Runtime::new().unwrap())
+// NOTE: Other pyo3 Python libraries have had issues with using tokio
+// behind a forking app-server like `gunicorn`
+// If we run into that problem, in the future we can look to `delta-rs`
+// which adds a check in that disallows calls from a forked process
+// https://github.com/delta-io/delta-rs/blob/87010461cfe01563d91a4b9cd6fa468e2ad5f283/python/src/utils.rs#L10-L31
+fn get_runtime() -> &'static RwLock<Option<Runtime>> {
+    static RUNTIME: OnceLock<RwLock<Option<Runtime>>> = OnceLock::new();
+    RUNTIME.get_or_init(|| RwLock::new(Some(Runtime::new().unwrap())))
+}
+
+/// Returns a Handle for spawning tasks without blocking on the runtime lock.
+pub fn get_tokio_handle() -> Handle {
+    get_runtime()
+        .read()
+        .unwrap()
+        .as_ref()
+        .expect("tokio runtime has been shut down")
+        .handle()
+        .clone()
+}
+
+/// Shuts down the process-wide tokio runtime. Safe to call from Python before
+/// sys.exit() to avoid a Py_Finalize / blocking-pool drop deadlock.
+pub fn shutdown_runtime(timeout_secs: Option<u64>) {
+    let old = get_runtime().write().unwrap().take();
+    if let Some(rt) = old {
+        match timeout_secs {
+            Some(s) => rt.shutdown_timeout(std::time::Duration::from_secs(s)),
+            None => rt.shutdown_background(),
+        }
+    }
 }
 
 /// Utility to collect rust futures with GIL released
@@ -31,7 +53,8 @@ where
     F: Send + Future,
     F::Output: Send,
 {
-    let runtime: &Runtime = get_tokio_runtime();
+    let guard = get_runtime().read().unwrap();
+    let runtime = guard.as_ref().expect("tokio runtime has been shut down");
     py.detach(|| runtime.block_on(f))
 }
 #[allow(clippy::redundant_async_block)]
