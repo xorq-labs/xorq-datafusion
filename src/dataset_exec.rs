@@ -6,13 +6,11 @@ use pyo3::types::{PyDict, PyIterator, PyList};
 use std::any::Any;
 use std::sync::Arc;
 
-use futures::{stream, TryStreamExt};
+use futures::stream;
 
 use crate::errors::DataFusionError;
 use crate::pyarrow_filter_expression::PyArrowFilterExpression;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::error::ArrowError;
-use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError as InnerDataFusionError, Result as DFResult};
@@ -26,34 +24,18 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
 };
 
-struct PyArrowBatchesAdapter {
-    batches: Py<PyIterator>,
-}
-
-impl Iterator for PyArrowBatchesAdapter {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Python::attach(|py| {
-            let mut batches = self.batches.clone_ref(py).into_bound(py);
-            Some(
-                batches
-                    .next()?
-                    .and_then(|batch| Ok(batch.extract::<PyArrowType<_>>()?.0))
-                    .map_err(|err| ArrowError::ExternalError(Box::new(err))),
-            )
-        })
-    }
-}
+/// Batches buffered between the blocking reader thread and the async consumer.
+const CHANNEL_CAPACITY: usize = 8;
 
 // Wraps a pyarrow.dataset.Dataset class and implements a Datafusion ExecutionPlan around it
 #[derive(Debug)]
 pub(crate) struct DatasetExec {
-    dataset: Py<PyAny>,
+    // Wrapped in Arc so execute() can clone without acquiring the GIL.
+    dataset: Arc<Py<PyAny>>,
     schema: SchemaRef,
-    fragments: Py<PyList>,
+    fragments: Arc<Py<PyList>>,
     columns: Option<Vec<String>>,
-    filter_expr: Option<Py<PyAny>>,
+    filter_expr: Option<Arc<Py<PyAny>>>,
     plan_properties: Arc<datafusion::physical_plan::PlanProperties>,
 }
 
@@ -121,11 +103,11 @@ impl DatasetExec {
         ));
 
         Ok(DatasetExec {
-            dataset: dataset.clone().unbind(),
+            dataset: Arc::new(dataset.clone().unbind()),
             schema,
-            fragments: fragments.clone().unbind(),
+            fragments: Arc::new(fragments.clone().unbind()),
             columns,
-            filter_expr,
+            filter_expr: filter_expr.map(Arc::new),
             plan_properties,
         })
     }
@@ -133,16 +115,13 @@ impl DatasetExec {
 
 impl ExecutionPlan for DatasetExec {
     fn name(&self) -> &str {
-        // [ExecutionPlan::name] docs recommends forwarding to `static_name`
         Self::static_name()
     }
 
-    /// Return a reference to Any that can be used for downcasting
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    /// Get the schema for this execution plan
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -152,7 +131,6 @@ impl ExecutionPlan for DatasetExec {
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        // this is a leaf node and has no children
         vec![]
     }
 
@@ -169,55 +147,87 @@ impl ExecutionPlan for DatasetExec {
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let batch_size = context.session_config().batch_size();
-        Python::attach(|py| {
-            let dataset = self.dataset.bind(py);
-            let fragments = self.fragments.bind(py);
-            let fragment = fragments
-                .get_item(partition)
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
+        // Arc clones — no GIL needed.
+        let dataset = self.dataset.clone();
+        let fragments = self.fragments.clone();
+        let filter_expr = self.filter_expr.clone();
+        let columns = self.columns.clone();
+        let schema = self.schema.clone();
 
-            // We need to pass the dataset schema to unify the fragment and dataset schema per PyArrow docs
-            let dataset_schema = dataset
-                .getattr("schema")
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-            let kwargs = PyDict::new(py);
-            kwargs
-                .set_item("columns", self.columns.clone())
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-            kwargs
-                .set_item(
-                    "filter",
-                    self.filter_expr.as_ref().map(|expr| expr.clone_ref(py)),
-                )
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-            kwargs
-                .set_item("batch_size", batch_size)
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-            let scanner = fragment
-                .call_method("scanner", (dataset_schema,), Some(&kwargs))
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-            let schema: SchemaRef = Arc::new(
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+
+        // One blocking thread owns the iterator for the entire stream lifetime.
+        // GIL is acquired and released once per batch; it is always released
+        // before blocking_send so other Python threads can run while the async
+        // consumer catches up.  This eliminates the per-batch spawn_blocking
+        // overhead of the previous design while preserving the GIL-on-async-worker
+        // deadlock fix.
+        tokio::task::spawn_blocking(move || {
+            let iter = match Python::attach(|py| -> Result<Py<PyIterator>, InnerDataFusionError> {
+                let fragment = fragments
+                    .bind(py)
+                    .get_item(partition)
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))?;
+                let dataset_schema = dataset
+                    .bind(py)
+                    .getattr("schema")
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))?;
+                let kwargs = PyDict::new(py);
+                kwargs
+                    .set_item("columns", columns)
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))?;
+                kwargs
+                    .set_item("filter", filter_expr.as_deref().map(|e| e.bind(py)))
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))?;
+                kwargs
+                    .set_item("batch_size", batch_size)
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))?;
+                let scanner = fragment
+                    .call_method("scanner", (dataset_schema,), Some(&kwargs))
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))?;
                 scanner
-                    .getattr("projected_schema")
-                    .and_then(|schema| Ok(schema.extract::<PyArrowType<_>>()?.0))
-                    .map_err(|err| InnerDataFusionError::External(Box::new(err)))?,
-            );
-            let record_batches: Bound<'_, PyIterator> = scanner
-                .call_method0("to_batches")
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?
-                .try_iter()
-                .map_err(|err| InnerDataFusionError::External(Box::new(err)))?;
-
-            let record_batches = PyArrowBatchesAdapter {
-                batches: record_batches.into(),
+                    .call_method0("to_batches")
+                    .and_then(|it| it.try_iter())
+                    .map(|it| it.unbind())
+                    .map_err(|e| InnerDataFusionError::External(Box::new(e)))
+            }) {
+                Ok(it) => it,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
             };
 
-            let record_batch_stream = stream::iter(record_batches);
-            let record_batch_stream: SendableRecordBatchStream = Box::pin(
-                RecordBatchStreamAdapter::new(schema, record_batch_stream.map_err(|e| e.into())),
-            );
-            Ok(record_batch_stream)
-        })
+            loop {
+                // GIL released when Python::attach closure returns, before blocking_send.
+                let next = Python::attach(|py| {
+                    let mut bound_iter = iter.clone_ref(py).into_bound(py);
+                    bound_iter.next().map(|r| {
+                        r.and_then(|batch| Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0))
+                            .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
+                    })
+                });
+
+                match next {
+                    None => break,
+                    Some(Err(e)) => {
+                        let _ = tx.blocking_send(Err(e));
+                        break;
+                    }
+                    Some(Ok(rb)) => {
+                        if tx.blocking_send(Ok(rb)).is_err() {
+                            break; // receiver dropped — query cancelled
+                        }
+                    }
+                }
+            }
+        });
+
+        let stream = stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
 

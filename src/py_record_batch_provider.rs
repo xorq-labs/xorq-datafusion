@@ -19,7 +19,13 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::DataFusionError;
 use datafusion_expr::Expr;
+use futures::stream;
 use pyo3::prelude::*;
+
+/// Batches buffered in the channel between the blocking reader thread and the
+/// async stream consumer.  Limits memory while allowing the reader to stay
+/// one step ahead of the consumer.
+const CHANNEL_CAPACITY: usize = 8;
 
 /// A [`TableProvider`] backed by a Python object that supports the Arrow C stream
 /// interface (`__arrow_c_stream__`).
@@ -157,11 +163,6 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
         Ok(self)
     }
 
-    /// Acquire a fresh stream from Python and return it as a lazy async stream.
-    ///
-    /// Each batch is fetched inside `spawn_blocking` so that the Arrow C-callback
-    /// invocations (which may need the GIL) never block the Tokio executor thread.
-    /// Only one batch is in flight at a time; the full dataset is never materialised.
     fn execute(
         &self,
         _partition: usize,
@@ -169,49 +170,54 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
     ) -> Result<SendableRecordBatchStream> {
         let projections = self.projections.clone();
         let projected_schema = self.projected_schema.clone();
+        let py_object = self.record_batch_provider.py_object.clone();
 
-        let reader = Python::attach(|py| {
-            self.record_batch_provider
-                .py_object
-                .bind(py)
-                .extract::<PyArrowType<ArrowArrayStreamReader>>()
-                .map(|t| t.0)
-                .map_err(|e| DataFusionError::External(Box::new(e)))
-        })?;
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
 
-        // Drive the sync reader one batch at a time from a blocking thread so we
-        // never stall the async executor.  The reader is moved into the unfold state
-        // and is held for the lifetime of the stream.
-        let stream = futures::stream::unfold(Some(reader), move |state| {
-            let projections = projections.clone();
-            async move {
-                let mut reader = state?;
-                let result = tokio::task::spawn_blocking(move || {
-                    // Acquire the GIL for each batch: the C callbacks registered by
-                    // PyArrow may call back into Python for non-in-memory sources.
-                    let batch = Python::attach(|_py| reader.next());
-                    (batch, reader)
-                })
-                .await;
+        // One blocking thread owns the reader for the entire stream lifetime.
+        // GIL is acquired and released once per batch; it is always released
+        // before blocking_send so other Python threads can run while the async
+        // consumer catches up.  This eliminates the per-batch spawn_blocking
+        // overhead of the previous design.
+        tokio::task::spawn_blocking(move || {
+            let mut reader = match Python::attach(|py| {
+                py_object
+                    .bind(py)
+                    .extract::<PyArrowType<ArrowArrayStreamReader>>()
+                    .map(|t| t.0)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
+            };
 
-                match result {
-                    Ok((None, _)) => None,
-                    Ok((Some(batch_result), reader)) => {
-                        let item = batch_result.map_err(DataFusionError::from).and_then(|rb| {
-                            match &projections {
-                                Some(pj) => {
-                                    rb.project(pj.as_slice()).map_err(DataFusionError::from)
-                                }
-                                None => Ok(rb),
-                            }
-                        });
-                        Some((item, Some(reader)))
+            loop {
+                // GIL released when Python::attach closure returns, before blocking_send.
+                let next = Python::attach(|_py| reader.next());
+                match next {
+                    None => break,
+                    Some(Err(e)) => {
+                        let _ = tx.blocking_send(Err(DataFusionError::from(e)));
+                        break;
                     }
-                    Err(join_err) => {
-                        Some((Err(DataFusionError::External(Box::new(join_err))), None))
+                    Some(Ok(rb)) => {
+                        let item = match &projections {
+                            Some(pj) => rb.project(pj.as_slice()).map_err(DataFusionError::from),
+                            None => Ok(rb),
+                        };
+                        if tx.blocking_send(item).is_err() {
+                            break; // receiver dropped — query cancelled
+                        }
                     }
                 }
             }
+        });
+
+        let stream = stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
         });
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
