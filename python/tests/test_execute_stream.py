@@ -37,100 +37,77 @@ def stream_via_struct(df) -> pa.Table:
     return pa.Table.from_batches(batches) if batches else pa.table({})
 
 
-class TestUDFExecuteStream:
-    """execute_stream == collect for scalar UDFs with varied return types."""
-
-    @given(udf_dataframe())
-    @settings(
-        max_examples=50,
-        suppress_health_check=[
-            HealthCheck.too_slow,
-            HealthCheck.function_scoped_fixture,
-        ],
-    )
-    def test_stream_matches_collect(self, ctx_df_type):
-        _ctx, df, _rt = ctx_df_type
-        via_collect = collect_all(df)
-        # Re-execute: DataFusion DFs are consumed after first execution.
-        df2 = df  # same df object, DataFusion re-executes lazily
-        via_stream = stream_all(df2)
-        assert via_collect.equals(via_stream)
-
-    @given(udf_dataframe())
-    @settings(
-        max_examples=50,
-        suppress_health_check=[
-            HealthCheck.too_slow,
-            HealthCheck.function_scoped_fixture,
-        ],
-    )
-    def test_struct_pipeline_does_not_raise(self, ctx_df_type):
-        """The struct-cast path must not raise C Data interface errors."""
-        _ctx, df, _rt = ctx_df_type
-        # collect first so we have expected data
-        expected = collect_all(df)
-        via_struct = stream_via_struct(df)
-        assert via_struct.num_rows == expected.num_rows
-
-    @given(udf_dataframe())
-    @settings(
-        max_examples=30,
-        suppress_health_check=[
-            HealthCheck.too_slow,
-            HealthCheck.function_scoped_fixture,
-        ],
-    )
-    def test_result_column_type_matches_schema(self, ctx_df_type):
-        """Column type in streamed batches matches declared schema."""
-        _ctx, df, return_type = ctx_df_type
-        declared = df.schema().field("result").type
-        for batch in df.execute_stream():
-            pa_batch = batch.to_pyarrow()
-            assert pa_batch.schema.field("result").type == declared
+@given(udf_dataframe())
+@settings(
+    max_examples=50,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_udf_stream_matches_collect(ctx_df_type):
+    _ctx, df, _rt = ctx_df_type
+    via_collect = collect_all(df)
+    via_stream = stream_all(df)
+    assert via_collect.equals(via_stream)
 
 
-class TestUDAFExecuteStream:
-    """execute_stream == collect for UDAFs with varied return types."""
+@given(udf_dataframe())
+@settings(
+    max_examples=50,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_udf_struct_pipeline_does_not_raise(ctx_df_type):
+    """The struct-cast path must not raise C Data interface errors."""
+    _ctx, df, _rt = ctx_df_type
+    expected = collect_all(df)
+    via_struct = stream_via_struct(df)
+    assert via_struct.num_rows == expected.num_rows
 
-    @given(udaf_dataframe())
-    @settings(
-        max_examples=50,
-        suppress_health_check=[
-            HealthCheck.too_slow,
-            HealthCheck.function_scoped_fixture,
-        ],
-    )
-    def test_stream_matches_collect(self, ctx_df_type):
-        _ctx, df, _rt = ctx_df_type
-        via_collect = collect_all(df)
-        via_stream = stream_all(df)
-        assert via_collect.equals(via_stream)
 
-    @given(udaf_dataframe())
-    @settings(
-        max_examples=50,
-        suppress_health_check=[
-            HealthCheck.too_slow,
-            HealthCheck.function_scoped_fixture,
-        ],
-    )
-    def test_struct_pipeline_does_not_raise(self, ctx_df_type):
-        """The struct-cast path must not raise C Data interface errors."""
-        _ctx, df, _rt = ctx_df_type
-        expected = collect_all(df)
-        via_struct = stream_via_struct(df)
-        assert via_struct.num_rows == expected.num_rows
+@given(udf_dataframe())
+@settings(
+    max_examples=30,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_udf_result_column_type_matches_schema(ctx_df_type):
+    """Column type in streamed batches matches declared schema."""
+    _ctx, df, return_type = ctx_df_type
+    declared = df.schema().field("result").type
+    for batch in df.execute_stream():
+        pa_batch = batch.to_pyarrow()
+        assert pa_batch.schema.field("result").type == declared
 
-    @given(udaf_dataframe())
-    @settings(
-        max_examples=30,
-        suppress_health_check=[
-            HealthCheck.too_slow,
-            HealthCheck.function_scoped_fixture,
-        ],
-    )
-    def test_aggregate_returns_one_row(self, ctx_df_type):
-        """UDAF without GROUP BY always returns exactly one row."""
-        _ctx, df, _rt = ctx_df_type
-        via_stream = stream_all(df)
-        assert via_stream.num_rows == 1
+
+@given(udaf_dataframe())
+@settings(
+    max_examples=50,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_udaf_stream_matches_collect(ctx_df_type):
+    _ctx, df, _rt = ctx_df_type
+    via_collect = collect_all(df)
+    via_stream = stream_all(df)
+    assert via_collect.equals(via_stream)
+
+
+@given(udaf_dataframe())
+@settings(
+    max_examples=50,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_udaf_struct_pipeline_does_not_raise(ctx_df_type):
+    """The struct-cast path must not raise C Data interface errors."""
+    _ctx, df, _rt = ctx_df_type
+    expected = collect_all(df)
+    via_struct = stream_via_struct(df)
+    assert via_struct.num_rows == expected.num_rows
+
+
+@given(udaf_dataframe())
+@settings(
+    max_examples=30,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_udaf_aggregate_returns_one_row(ctx_df_type):
+    """UDAF without GROUP BY always returns exactly one row."""
+    _ctx, df, _rt = ctx_df_type
+    via_stream = stream_all(df)
+    assert via_stream.num_rows == 1

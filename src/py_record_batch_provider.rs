@@ -195,8 +195,13 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
             };
 
             loop {
-                // GIL released when Python::attach closure returns, before blocking_send.
-                let next = Python::attach(|_py| reader.next());
+                // Do NOT hold the GIL across reader.next(): the Arrow C stream
+                // get_next callback acquires the GIL itself when it needs to call
+                // back into Python.  Holding GIL here while the callback tries to
+                // acquire a Rust mutex (held by another reader thread) creates a
+                // GIL+mutex inversion deadlock when two scans share the same
+                // upstream cache (e.g. batchcorder StreamCache).
+                let next = reader.next();
                 match next {
                     None => break,
                     Some(Err(e)) => {
