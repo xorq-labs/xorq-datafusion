@@ -196,7 +196,7 @@ _CONCURRENT_SCRIPT = textwrap.dedent("""\
         )
         ctx = xdf.SessionContext()
         ctx.register_record_batch_reader("t", cache)
-        barrier.wait(timeout=TIMEOUT_SECONDS)
+        barrier.wait(timeout=8)
         return ctx.sql(
             \"\"\"
             WITH totals AS (SELECT sum(x) AS total FROM t),
