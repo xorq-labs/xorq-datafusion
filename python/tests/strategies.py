@@ -127,7 +127,8 @@ def make_accumulator_class(return_type: pa.DataType):
 
         def merge(self, states: pa.Array) -> None:
             for s in states:
-                self._count += pickle.loads(s.as_py())
+                if s.is_valid:
+                    self._count += pickle.loads(s.as_py())
 
         def evaluate(self) -> pa.Scalar:
             return _make_scalar(return_type)

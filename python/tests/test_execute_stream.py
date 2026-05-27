@@ -45,7 +45,11 @@ def stream_via_struct(df) -> pa.Table:
 def test_udf_stream_matches_collect(ctx_df_type):
     _ctx, df, _rt = ctx_df_type
     via_collect = collect_all(df)
+    # DataFusion re-executes lazily; same df object can be consumed twice.
     via_stream = stream_all(df)
+    assert via_stream.num_rows > 0, (
+        "stream returned no rows — df may have been consumed"
+    )
     assert via_collect.equals(via_stream)
 
 
