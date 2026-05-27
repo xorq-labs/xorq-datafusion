@@ -1,0 +1,205 @@
+"""Hypothesis strategies for xorq_datafusion.
+
+Focuses on execute_stream / collect equivalence across UDF and UDAF return types,
+including binary variants that have triggered C Data interface failures.
+"""
+
+import pickle
+import uuid
+
+import pyarrow as pa
+from hypothesis import strategies as st
+
+# ---------------------------------------------------------------------------
+# Atomic: Arrow scalar types to test as UDF/UDAF return types
+# ---------------------------------------------------------------------------
+
+# Types that the C Data interface must round-trip correctly.
+# Binary variants are the known failure class; numeric/string included as
+# regression guard so we know when a fix breaks previously-working types.
+SCALAR_RETURN_TYPES = [
+    pa.binary(),
+    pa.large_binary(),
+    pa.int32(),
+    pa.int64(),
+    pa.float32(),
+    pa.float64(),
+    pa.utf8(),
+    pa.large_utf8(),
+    pa.bool_(),
+]
+
+arrow_return_type = st.sampled_from(SCALAR_RETURN_TYPES)
+
+# Input column is always float64 — simple, widely supported, avoids
+# distraction from the type under test (the return type).
+INPUT_TYPE = pa.float64()
+
+
+# ---------------------------------------------------------------------------
+# Composite: record batches with float64 column(s)
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def float64_record_batch(draw, min_cols=1, max_cols=4, min_rows=1, max_rows=20):
+    """RecordBatch with 1-4 float64 columns and 1-20 rows."""
+    n_cols = draw(st.integers(min_value=min_cols, max_value=max_cols))
+    n_rows = draw(st.integers(min_value=min_rows, max_value=max_rows))
+    cols = [
+        pa.array(
+            draw(
+                st.lists(
+                    st.floats(allow_nan=False, allow_infinity=False),
+                    min_size=n_rows,
+                    max_size=n_rows,
+                )
+            )
+        )
+        for _ in range(n_cols)
+    ]
+    names = [f"f{i}" for i in range(n_cols)]
+    return pa.RecordBatch.from_arrays(cols, names=names)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: build pyarrow scalar / array of any supported return type
+# ---------------------------------------------------------------------------
+
+
+def _make_value(return_type: pa.DataType, n: int) -> pa.Array:
+    """Return a length-n array of `return_type` with simple deterministic values."""
+    if pa.types.is_binary(return_type) or pa.types.is_large_binary(return_type):
+        data = [pickle.dumps(i) for i in range(n)]
+    elif pa.types.is_integer(return_type):
+        data = list(range(n))
+    elif pa.types.is_floating(return_type):
+        data = [float(i) for i in range(n)]
+    elif pa.types.is_string(return_type) or pa.types.is_large_string(return_type):
+        data = [str(i) for i in range(n)]
+    elif pa.types.is_boolean(return_type):
+        data = [i % 2 == 0 for i in range(n)]
+    else:
+        raise ValueError(f"Unsupported return type: {return_type}")
+    return pa.array(data, type=return_type)
+
+
+def _make_scalar(return_type: pa.DataType) -> pa.Scalar:
+    """Return a single pa.Scalar of `return_type`."""
+    return _make_value(return_type, 1)[0]
+
+
+# ---------------------------------------------------------------------------
+# UDF factory: scalar function that maps float64 columns → return_type array
+# ---------------------------------------------------------------------------
+
+
+def make_udf_func(return_type: pa.DataType):
+    """Return a Python callable suitable for xorq_datafusion.udf."""
+
+    def func(*args):
+        n = len(args[0])
+        return _make_value(return_type, n)
+
+    func.__name__ = f"udf_func_{return_type}"
+    return func
+
+
+# ---------------------------------------------------------------------------
+# UDAF factory: accumulator class with binary state, configurable return type
+# ---------------------------------------------------------------------------
+
+
+def make_accumulator_class(return_type: pa.DataType):
+    """Dynamically create an Accumulator subclass for the given return type."""
+    from xorq_datafusion import Accumulator
+
+    class DynAccumulator(Accumulator):
+        def __init__(self):
+            self._count = 0
+
+        def state(self) -> list[pa.Scalar]:
+            # State is always binary (serialised int counter).
+            return [pa.scalar(pickle.dumps(self._count), type=pa.binary())]
+
+        def update(self, values: pa.Array) -> None:
+            self._count += len(values)
+
+        def merge(self, states: pa.Array) -> None:
+            for s in states:
+                if s.is_valid:
+                    self._count += pickle.loads(s.as_py())
+
+        def evaluate(self) -> pa.Scalar:
+            return _make_scalar(return_type)
+
+    DynAccumulator.__name__ = f"Accum_{return_type}"
+    return DynAccumulator
+
+
+# ---------------------------------------------------------------------------
+# Composite: fully-wired (ctx, df, return_type) ready to call execute_stream
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def udf_dataframe(draw):
+    """SessionContext + DataFrame for a UDF that returns a varied type.
+
+    Draws: return type, input batch shape.
+    Returns: (ctx, df, return_type) — caller should not mutate ctx further.
+    """
+    import xorq_datafusion as xdf
+
+    return_type = draw(arrow_return_type)
+    batch = draw(float64_record_batch())
+    n_cols = batch.num_columns
+    col_names = batch.schema.names
+    uid = uuid.uuid4().hex[:8]
+
+    ctx = xdf.SessionContext()
+    ctx.register_record_batches(f"t_{uid}", [[batch]])
+
+    func = make_udf_func(return_type)
+    fn = xdf.udf(
+        func,
+        input_types=[INPUT_TYPE] * n_cols,
+        return_type=return_type,
+        volatility="volatile",
+        name=f"udf_{uid}",
+    )
+    ctx.register_udf(fn)
+
+    cols_sql = ", ".join(col_names)
+    df = ctx.sql(f"SELECT udf_{uid}({cols_sql}) AS result FROM t_{uid}")
+    return ctx, df, return_type
+
+
+@st.composite
+def udaf_dataframe(draw):
+    """SessionContext + DataFrame for a UDAF that returns a varied type.
+
+    Returns: (ctx, df, return_type).
+    """
+    import xorq_datafusion as xdf
+
+    return_type = draw(arrow_return_type)
+    batch = draw(float64_record_batch(min_cols=1, max_cols=1))
+    uid = uuid.uuid4().hex[:8]
+
+    ctx = xdf.SessionContext()
+    ctx.register_record_batches(f"t_{uid}", [[batch]])
+
+    accum_cls = make_accumulator_class(return_type)
+    agg = xdf.udaf(
+        accum_cls,
+        input_type=[INPUT_TYPE],
+        return_type=return_type,
+        state_type=[pa.binary()],
+        volatility="volatile",
+        name=f"udaf_{uid}",
+    )
+    ctx.register_udaf(agg)
+
+    df = ctx.sql(f"SELECT udaf_{uid}(f0) AS result FROM t_{uid}")
+    return ctx, df, return_type
