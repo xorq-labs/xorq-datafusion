@@ -171,7 +171,7 @@ impl PySessionState {
         Self { session_state }
     }
 
-    fn add_optimizer_rule(&mut self, rule: &Bound<'_, PyAny>) -> Self {
+    fn add_optimizer_rule(&self, rule: &Bound<'_, PyAny>) -> Self {
         let rule = PyOptimizerRule::new(rule);
 
         Self::from(
@@ -226,13 +226,13 @@ impl PySessionContext {
     }
 
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.
-    fn sql(&mut self, query: &str, py: Python) -> PyResult<PyDataFrame> {
+    fn sql(&self, query: &str, py: Python) -> PyResult<PyDataFrame> {
         let result = self.ctx.sql(query);
         let df = wait_for_future(py, result).map_err(from_datafusion_error)?;
         Ok(PyDataFrame::new(df))
     }
 
-    fn deregister_table(&mut self, name: &str) -> PyResult<()> {
+    fn deregister_table(&self, name: &str) -> PyResult<()> {
         self.ctx
             .deregister_table(name)
             .map_err(from_datafusion_error)?;
@@ -250,7 +250,7 @@ impl PySessionContext {
                         storage_options=None
     ))]
     fn register_parquet(
-        &mut self,
+        &self,
         name: &str,
         paths: &Bound<'_, PyAny>,
         table_partition_cols: Vec<(String, String)>,
@@ -311,7 +311,7 @@ impl PySessionContext {
                         file_compression_type=None,
                         storage_options=None))]
     fn register_csv(
-        &mut self,
+        &self,
         name: &str,
         paths: &Bound<'_, PyAny>,
         schema: Option<PyArrowType<Schema>>,
@@ -371,7 +371,7 @@ impl PySessionContext {
     }
 
     fn register_record_batches(
-        &mut self,
+        &self,
         name: &str,
         partitions: PyArrowType<Vec<Vec<RecordBatch>>>,
     ) -> PyResult<()> {
@@ -387,7 +387,7 @@ impl PySessionContext {
                         reader,
                         sort_order=None))]
     pub fn register_record_batch_reader(
-        &mut self,
+        &self,
         name: &str,
         reader: Bound<'_, PyAny>,
         sort_order: Option<Vec<PySortExpr>>,
@@ -434,7 +434,7 @@ impl PySessionContext {
     }
 
     pub fn register_ibis_table(
-        &mut self,
+        &self,
         name: &str,
         reader: &Bound<'_, PyAny>,
         py: Python,
@@ -450,7 +450,7 @@ impl PySessionContext {
 
     #[pyo3(name = "register_table_provider")]
     pub fn register_py_table_provider(
-        &mut self,
+        &self,
         name: &str,
         provider: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
@@ -464,7 +464,7 @@ impl PySessionContext {
         Ok(())
     }
 
-    pub fn register_dataframe(&mut self, name: &str, dataframe: PyDataFrame) -> PyResult<()> {
+    pub fn register_dataframe(&self, name: &str, dataframe: PyDataFrame) -> PyResult<()> {
         let table: Arc<dyn TableProvider> = dataframe.df.as_ref().clone().into_view();
 
         self.ctx
@@ -474,7 +474,7 @@ impl PySessionContext {
         Ok(())
     }
 
-    pub fn register_table(&mut self, name: &str, table: &PyTable) -> PyResult<()> {
+    pub fn register_table(&self, name: &str, table: &PyTable) -> PyResult<()> {
         self.ctx
             .register_table(name, table.table())
             .map_err(from_datafusion_error)?;
@@ -522,24 +522,24 @@ impl PySessionContext {
         self.ctx.session_id()
     }
 
-    fn register_udf(&mut self, udf: PyScalarUDF) -> PyResult<()> {
+    fn register_udf(&self, udf: PyScalarUDF) -> PyResult<()> {
         self.ctx.register_udf(udf.function);
         Ok(())
     }
 
-    fn register_udaf(&mut self, udaf: PyAggregateUDF) -> PyResult<()> {
+    fn register_udaf(&self, udaf: PyAggregateUDF) -> PyResult<()> {
         self.ctx.register_udaf(udaf.function);
         Ok(())
     }
 
-    pub fn register_udwf(&mut self, udwf: PyWindowUDF) -> PyResult<()> {
+    pub fn register_udwf(&self, udwf: PyWindowUDF) -> PyResult<()> {
         self.ctx.register_udwf(udwf.function);
         Ok(())
     }
 
     #[pyo3(signature = (path, file_format, **kwargs))]
     pub fn get_object_metadata(
-        &mut self,
+        &self,
         path: PathBuf,
         file_format: &str,
         kwargs: Option<&Bound<'_, PyDict>>,
