@@ -216,6 +216,43 @@ def test_all_slots_replay_after_upstream_exhausted():
     assert cache.upstream_exhausted
 
 
+def test_undersubscribed_cache_retains_all_batches():
+    """With fewer live readers than max_readers, eviction never starts: a reader
+    created after others have drained still replays from batch 0."""
+    pytest.importorskip("batchcorder")
+    values = [0, 1, 2, 3, 4]
+    cache = _make_stream_cache(values, 2, max_readers=5)
+    for _ in range(2):
+        pa.RecordBatchReader.from_stream(cache.reader()).read_all()
+    later = pa.RecordBatchReader.from_stream(cache.reader(from_start=True)).read_all()
+    assert later.column("x").to_pylist() == values
+
+
+def test_max_readers_must_cover_scan_count():
+    """Each DataFusion scan of the registered cache consumes one reader slot, so
+    a query that scans the table k times needs max_readers >= k.
+
+    This is the xorq integration footgun: a bound sized for a single scan
+    deadlocks/errors a multi-scan plan. max_readers=1 fails a 2-scan UNION ALL;
+    max_readers=2 succeeds.
+    """
+    pytest.importorskip("batchcorder")
+    import xorq_datafusion as xdf
+
+    values = [0, 1, 2, 3, 4]
+    union_all = "SELECT x FROM t UNION ALL SELECT x FROM t"
+
+    ctx1 = xdf.SessionContext()
+    ctx1.register_record_batch_reader("t", _make_stream_cache(values, 2, max_readers=1))
+    with pytest.raises(ValueError, match="Maximum number of readers"):
+        ctx1.sql(union_all).collect()
+
+    ctx2 = xdf.SessionContext()
+    ctx2.register_record_batch_reader("t", _make_stream_cache(values, 2, max_readers=2))
+    table = pa.Table.from_batches(ctx2.sql(union_all).collect(), schema=_SCHEMA)
+    assert sorted(table.column("x").to_pylist()) == sorted(values * 2)
+
+
 # ---------------------------------------------------------------------------
 # max_readers: bounded fan-out under concurrency
 # ---------------------------------------------------------------------------
