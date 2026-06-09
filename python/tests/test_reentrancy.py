@@ -101,20 +101,43 @@ class _NoopWindow(WindowEvaluator):
         return pa.array([0.0] * num_rows)
 
 
-def _invoke_register_record_batches(ctx, name):
+class _SimpleProvider:
+    """Minimal Python TableProvider backed by an in-memory batch.
+
+    A pure-pyarrow provider (no ibis backend) so concurrent `scan()` calls stay
+    thread-safe — the point under test is the `register_table_provider` borrow,
+    not a downstream engine's thread-safety.
+    """
+
+    def __init__(self, batch):
+        self._batch = batch
+
+    def schema(self):
+        return self._batch.schema
+
+    def scan(self, filters=None):
+        return pa.RecordBatchReader.from_batches(self._batch.schema, [self._batch])
+
+
+# Each invoker calls one method the fix changed, using a unique name so
+# concurrent iterations don't collide. Signature is (ctx, name, data_dir);
+# methods that don't need files ignore data_dir.
+
+
+def _invoke_register_record_batches(ctx, name, data_dir):
     ctx.register_record_batches(name, [[_BATCH]])
 
 
-def _invoke_register_record_batch_reader(ctx, name):
+def _invoke_register_record_batch_reader(ctx, name, data_dir):
     reader = pa.RecordBatchReader.from_batches(_BATCH.schema, [_BATCH])
     ctx.register_record_batch_reader(name, reader)
 
 
-def _invoke_register_dataframe(ctx, name):
+def _invoke_register_dataframe(ctx, name, data_dir):
     ctx.register_dataframe(name, ctx.sql("SELECT 1 AS a"))
 
 
-def _invoke_register_udf(ctx, name):
+def _invoke_register_udf(ctx, name, data_dir):
     ctx.register_udf(
         udf(
             make_udf_func(pa.float64()),
@@ -126,7 +149,7 @@ def _invoke_register_udf(ctx, name):
     )
 
 
-def _invoke_register_udaf(ctx, name):
+def _invoke_register_udaf(ctx, name, data_dir):
     ctx.register_udaf(
         udaf(
             make_accumulator_class(pa.float64()),
@@ -139,7 +162,7 @@ def _invoke_register_udaf(ctx, name):
     )
 
 
-def _invoke_register_udwf(ctx, name):
+def _invoke_register_udwf(ctx, name, data_dir):
     ctx.register_udwf(
         udwf(
             _NoopWindow(),
@@ -151,14 +174,42 @@ def _invoke_register_udwf(ctx, name):
     )
 
 
-def _invoke_deregister_table(ctx, name):
+def _invoke_deregister_table(ctx, name, data_dir):
     ctx.register_record_batches(name, [[_BATCH]])
     ctx.deregister_table(name)
 
 
-def _invoke_table(ctx, name):
-    # `table` itself releases the GIL via wait_for_future — two of these
-    # overlapping would have collided under `&mut self`.
+def _invoke_register_parquet(ctx, name, data_dir):
+    # Async: holds its borrow across an internal wait_for_future.
+    ctx.register_parquet(name, [str(data_dir / "data.rownum.parquet")])
+
+
+def _invoke_register_csv(ctx, name, data_dir):
+    # Async: holds its borrow across an internal wait_for_future.
+    ctx.register_csv(name, [str(data_dir / "iris.csv")])
+
+
+def _invoke_register_table(ctx, name, data_dir):
+    src = f"src_{name}"
+    ctx.register_csv(src, [str(data_dir / "iris.csv")])
+    table = ctx.catalog().database("public").table(src)
+    ctx.register_table(name, table)
+
+
+def _invoke_register_table_provider(ctx, name, data_dir):
+    ctx.register_table_provider(name, _SimpleProvider(_BATCH))
+
+
+def _invoke_get_object_metadata(ctx, name, data_dir):
+    # Read-only and async; collides with a live sql() borrow under `&mut self`.
+    ctx.get_object_metadata(
+        str((data_dir / "data.rownum.parquet").resolve()), "parquet"
+    )
+
+
+def _invoke_table(ctx, name, data_dir):
+    # `table` was already `&self`, but two overlapping calls plus sql() exercise
+    # the same shared-borrow path; kept as a regression guard.
     ctx.table("base")
 
 
@@ -170,14 +221,25 @@ _MODIFIED_METHODS = {
     "register_udaf": _invoke_register_udaf,
     "register_udwf": _invoke_register_udwf,
     "deregister_table": _invoke_deregister_table,
+    "register_parquet": _invoke_register_parquet,
+    "register_csv": _invoke_register_csv,
+    "register_table": _invoke_register_table,
+    "register_table_provider": _invoke_register_table_provider,
+    "get_object_metadata": _invoke_get_object_metadata,
     "table": _invoke_table,
 }
+
+# Two `&mut`→`&self` methods are not covered here, by design:
+# - register_ibis_table: needs an ibis reader wired the way xorq drives it;
+#   there is no standalone harness for it in this repo.
+# - add_optimizer_rule: a PySessionState builder that returns a fresh state,
+#   not a shared-SessionContext borrow, so the concurrency hazard doesn't apply.
 
 
 @pytest.mark.parametrize(
     "invoke", _MODIFIED_METHODS.values(), ids=list(_MODIFIED_METHODS)
 )
-def test_modified_method_concurrent_with_live_sql(invoke):
+def test_modified_method_concurrent_with_live_sql(invoke, data_dir):
     """A now-`&self` method called from many threads while sql() runs on the
     same shared context must not raise `Already borrowed`."""
     ctx = SessionContext()
@@ -200,7 +262,7 @@ def test_modified_method_concurrent_with_live_sql(invoke):
     def hammer(tid):
         try:
             for i in range(20):
-                invoke(ctx, f"m_{tid}_{i}")
+                invoke(ctx, f"m_{tid}_{i}", data_dir)
         except Exception as e:  # noqa: BLE001
             errors.append(("method", e))
 
