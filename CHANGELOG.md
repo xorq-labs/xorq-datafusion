@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.9] - 2026-06-09
+### Details
+#### Fixed
+- SessionContext.sql re-entrancy panic (Already borrowed) by @mesejo in [#38](https://github.com/xorq-labs/xorq-datafusion/pull/38)
+- Extend modified-method coverage to file/provider/metadata methods by @mesejo in [#39](https://github.com/xorq-labs/xorq-datafusion/pull/39)
+
 ## [0.2.8] - 2026-05-27
 ### Details
 #### Added
