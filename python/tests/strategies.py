@@ -94,6 +94,52 @@ def _make_scalar(return_type: pa.DataType) -> pa.Scalar:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Composite: row data for a batchcorder.StreamCache-backed int64 table
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def int64_stream_data(draw, max_rows=5000):
+    """(values, batch_size) modelling valid input to ``StreamCache``.
+
+    Models what a caller feeds a ``batchcorder.StreamCache``: an int64
+    RecordBatchReader plus the batch size used to chunk it. Constraints:
+
+    - ``batch_size`` floored at 50 so we don't generate tens of thousands of
+      single-row Arrow batches (the cache stores one entry per batch).
+    - ``max_rows`` capped (default 5000) so concurrent/threaded tests that
+      fan out N readers over this data stay well within their timeout.
+    - values are tiled from a small *unique* base list (>= 2 distinct), so
+      sum/max/count are non-trivial without blowing up the example size.
+
+    Empty (``n_rows == 0``) is included on purpose: it is the boundary where a
+    StreamCache produces zero batches and aggregates return NULL.
+    """
+    n_rows = draw(st.integers(min_value=0, max_value=max_rows))
+    base = draw(
+        st.lists(
+            st.integers(min_value=-1000, max_value=1000),
+            min_size=2,
+            max_size=64,
+            unique=True,
+        )
+    )
+    values = (base * (n_rows // len(base) + 1))[:n_rows]
+    batch_size = draw(st.integers(min_value=50, max_value=2000))
+    return values, batch_size
+
+
+# Number of concurrent workers / fan-out readers. Kept small: every worker is
+# a real OS thread running a DataFusion query, so the search space is in the
+# interaction (interleaving), not in raw thread count.
+worker_count = st.integers(min_value=2, max_value=6)
+
+# LIMIT applied to a teardown query. 0 is valid SQL (empty result) and is a
+# distinct teardown path, so it is included.
+limit_value = st.integers(min_value=0, max_value=200)
+
+
 def make_udf_func(return_type: pa.DataType):
     """Return a Python callable suitable for xorq_datafusion.udf."""
 
