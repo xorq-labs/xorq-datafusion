@@ -469,3 +469,96 @@ def test_concurrent_reentry_shared_inner_ctx(values, n):
 
     for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
         assert _ids(rows) == expected
+
+
+# ---------------------------------------------------------------------------
+# Mixed types + nulls, exercised across SQL shapes through a re-entrant provider
+# ---------------------------------------------------------------------------
+
+_MIXED_SCHEMA = pa.schema(
+    [
+        ("i", pa.int64()),
+        ("b", pa.bool_()),
+        ("s", pa.utf8()),
+        ("f", pa.float64()),
+    ]
+)
+
+
+def _mixed_inner():
+    """An inner context holding a `data` table with ints, bools, strings,
+    floats — and a null in every column."""
+    inner = SessionContext()
+    batch = pa.record_batch(
+        {
+            "i": pa.array([1, 2, 2, 3, None, 5], type=pa.int64()),
+            "b": pa.array([True, False, True, None, False, True], type=pa.bool_()),
+            "s": pa.array(["a", "b", "a", None, "c", "a"], type=pa.utf8()),
+            "f": pa.array([1.5, 2.5, None, 4.0, 5.5, 1.5], type=pa.float64()),
+        },
+        schema=_MIXED_SCHEMA,
+    )
+    inner.register_record_batches("data", [[batch]])
+    return inner
+
+
+class _MixedReentrantProvider:
+    """Re-entrant provider that serves the full mixed-type `data` table."""
+
+    def __init__(self, src_ctx):
+        self.src_ctx = src_ctx
+
+    def schema(self):
+        return _MIXED_SCHEMA
+
+    def scan(self, filters=None):
+        batches = self.src_ctx.sql("select * from data").collect()
+        return pa.RecordBatchReader.from_batches(_MIXED_SCHEMA, batches)
+
+
+_MIXED_QUERIES = [
+    pytest.param(
+        "select count(*) c from {t} a join {t} b on a.i = b.i", id="self_join"
+    ),
+    pytest.param("select i from {t} order by i nulls last limit 3", id="limit"),
+    pytest.param(
+        "select s, count(*) c from {t} group by s order by s nulls last", id="group_by"
+    ),
+    pytest.param(
+        "select s, count(*) c from {t} group by s having count(*) > 1 "
+        "order by s nulls last",
+        id="having",
+    ),
+    pytest.param(
+        "select i, f from {t} order by i nulls last, f nulls last", id="order_by"
+    ),
+    pytest.param("select distinct s from {t} order by s nulls last", id="distinct"),
+    pytest.param(
+        "select count(i) ci, count(*) ca, sum(f) sf, max(b) mb from {t}",
+        id="agg_with_nulls",
+    ),
+    pytest.param(
+        "select i from {t} where f > 2.0 order by i nulls last", id="where_filter"
+    ),
+]
+
+
+@pytest.mark.parametrize("query", _MIXED_QUERIES)
+def test_reentrant_mixed_types_match_direct(query):
+    """A re-entrant provider over a mixed-type, null-bearing table must produce
+    the same result as running the query directly against the source table —
+    across self-join / limit / group by / having / order by / distinct /
+    aggregate / filter shapes."""
+    inner = _mixed_inner()
+    outer = SessionContext()
+    outer.register_table_provider("reentrant", _MixedReentrantProvider(inner))
+
+    expected = pa.Table.from_batches(
+        inner.sql(query.format(t="data")).collect()
+    ).to_pylist()
+    actual = _run_with_timeout(
+        lambda: pa.Table.from_batches(
+            outer.sql(query.format(t="reentrant")).collect()
+        ).to_pylist()
+    )
+    assert actual == expected
