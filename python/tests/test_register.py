@@ -1,4 +1,6 @@
-from abc import abstractmethod, ABCMeta
+from abc import ABCMeta, abstractmethod
+
+import ibis
 
 
 class AbstractTableProvider(metaclass=ABCMeta):
@@ -27,8 +29,6 @@ class IbisTableProvider(AbstractTableProvider):
 
 
 def test_register_table_provider(ctx, data_dir):
-    import ibis
-
     table = ibis.read_parquet(data_dir / "data.rownum.parquet")
     ctx.register_table_provider("data", IbisTableProvider(table))
 

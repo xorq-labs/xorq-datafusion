@@ -1,7 +1,10 @@
+from pathlib import Path
+
+import pyarrow as pa
 import pytest
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ctx_data(ctx, data_dir):
     ctx.register_parquet(
         "functional_alltypes", [str(data_dir / "functional_alltypes.parquet")]
@@ -12,8 +15,6 @@ def ctx_data(ctx, data_dir):
 
 
 def get_queries():
-    from pathlib import Path
-
     queries_file_path = Path(__file__).parent / "fixtures" / "queries.sql"
     with open(queries_file_path) as queries_file:
         result = [query.strip() for query in queries_file]
@@ -30,8 +31,6 @@ def test_sql_query(ctx_data, query):
 
 
 def to_pyarrow_batches(batches, schema):
-    import pyarrow as pa
-
     def make_gen():
         return (batch.to_pyarrow().cast(schema) for batch in batches)
 

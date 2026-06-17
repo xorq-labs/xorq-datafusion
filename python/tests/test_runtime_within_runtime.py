@@ -31,9 +31,9 @@ import threading
 import pyarrow as pa
 import pytest
 from hypothesis import HealthCheck, given, settings
-from xorq_datafusion import SessionContext, udf
 
 from tests.strategies import int64_table_values, nesting_depth, worker_count
+from xorq_datafusion import SessionContext, udf
 
 _SCHEMA = pa.schema([("id", pa.int64())])
 _TIMEOUT = 15

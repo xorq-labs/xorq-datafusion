@@ -5,9 +5,9 @@ for all supported Arrow return types, including binary variants.
 """
 
 import pyarrow as pa
-from hypothesis import given, settings, HealthCheck
+from hypothesis import HealthCheck, given, settings
 
-from tests.strategies import udf_dataframe, udaf_dataframe
+from tests.strategies import udaf_dataframe, udf_dataframe
 
 
 def collect_all(df) -> pa.Table:

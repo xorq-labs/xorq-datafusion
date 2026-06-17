@@ -10,6 +10,6 @@ def data_dir():
     return (Path(__file__).parents[2] / "data").resolve()
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ctx():
     return SessionContext()

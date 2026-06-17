@@ -25,6 +25,7 @@ import pytest
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
+import xorq_datafusion as xdf
 
 TIMEOUT_SECONDS = 8
 _HYPOTHESIS_TIMEOUT = 15
@@ -264,8 +265,6 @@ def test_concurrent_two_scan_no_deadlock_subprocess():
 def test_two_scan_correct_results():
     """Two-scan query returns correct values; threading.Event timeout catches deadlock."""
     batchcorder = pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     schema = pa.schema([("x", pa.int64())])
     cache = batchcorder.StreamCache(
         pa.RecordBatchReader.from_batches(
@@ -309,8 +308,6 @@ def test_two_scan_correct_results():
 def test_two_scan_via_execute_stream():
     """Two-scan query via execute_stream must not deadlock."""
     batchcorder = pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     schema = pa.schema([("x", pa.int64())])
     cache = batchcorder.StreamCache(
         pa.RecordBatchReader.from_batches(
@@ -354,8 +351,6 @@ def test_two_scan_via_execute_stream():
 def test_union_all_two_scan_no_deadlock():
     """UNION ALL forces two scans of the same StreamCache table."""
     batchcorder = pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     schema = pa.schema([("x", pa.int64())])
     cache = batchcorder.StreamCache(
         pa.RecordBatchReader.from_batches(
@@ -393,8 +388,6 @@ def test_union_all_two_scan_no_deadlock():
 def test_three_scan_no_deadlock():
     """Three CTEs each scanning the same StreamCache table must not deadlock."""
     batchcorder = pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     schema = pa.schema([("x", pa.int64())])
     cache = batchcorder.StreamCache(
         pa.RecordBatchReader.from_batches(
@@ -441,8 +434,6 @@ def test_three_scan_no_deadlock():
 def test_concurrent_two_scan_queries_no_deadlock():
     """N threads each running a simultaneous two-scan query must not deadlock."""
     batchcorder = pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     N = 4
     schema = pa.schema([("x", pa.int64())])
     barrier = threading.Barrier(N)
@@ -506,7 +497,8 @@ def _table_data(draw):
 
 def _make_stream_cache(values, batch_size):
     """StreamCache with int64/float64/utf8 columns split into batch_size-row batches."""
-    from batchcorder import StreamCache
+    # Lazy import keeps batchcorder optional (callers guard with importorskip).
+    from batchcorder import StreamCache  # noqa: PLC0415
 
     def _batches():
         for start in range(0, len(values), batch_size):
@@ -550,8 +542,6 @@ def test_prop_two_scan_cte_collect_correct_results(values_and_batch_size):
     """Four-scan CTE via collect returns correct aggregates for all three columns."""
     values, batch_size = values_and_batch_size
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     ctx = xdf.SessionContext()
     ctx.register_record_batch_reader("t", _make_stream_cache(values, batch_size))
 
@@ -590,8 +580,6 @@ def test_prop_two_scan_execute_stream_correct_results(values_and_batch_size):
     """Four-scan CTE via execute_stream returns correct aggregates for all three columns."""
     values, batch_size = values_and_batch_size
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     ctx = xdf.SessionContext()
     ctx.register_record_batch_reader("t", _make_stream_cache(values, batch_size))
 
@@ -631,8 +619,6 @@ def test_prop_union_all_two_scan_correct_results(values_and_batch_size):
     """UNION ALL two-scan returns all columns from every row exactly twice."""
     values, batch_size = values_and_batch_size
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     ctx = xdf.SessionContext()
     ctx.register_record_batch_reader("t", _make_stream_cache(values, batch_size))
 
@@ -663,8 +649,6 @@ def test_prop_three_scan_cte_correct_results(values_and_batch_size):
     """Five-scan CTE returns correct sum, count, max, and aggregates for all columns."""
     values, batch_size = values_and_batch_size
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     ctx = xdf.SessionContext()
     ctx.register_record_batch_reader("t", _make_stream_cache(values, batch_size))
 
@@ -713,8 +697,6 @@ def test_prop_concurrent_two_scan_correct_results(values_and_batch_size):
     expected_y_total = sum(float(v) * 0.001 for v in values) if values else None
 
     def worker(_idx):
-        import xorq_datafusion as xdf
-
         ctx = xdf.SessionContext()
         ctx.register_record_batch_reader("t", _make_stream_cache(values, batch_size))
         barrier.wait(timeout=_HYPOTHESIS_TIMEOUT)
@@ -763,8 +745,6 @@ def test_prop_concurrent_shared_cache_correct_results(values_and_batch_size):
     """
     values, batch_size = values_and_batch_size
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     N = 4
     barrier = threading.Barrier(N)
     shared_cache = _make_stream_cache(values, batch_size)
