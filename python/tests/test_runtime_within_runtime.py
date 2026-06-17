@@ -31,7 +31,7 @@ import pyarrow as pa
 import pytest
 from hypothesis import HealthCheck, given, settings
 
-from xorq_datafusion import SessionContext
+from xorq_datafusion import SessionContext, udf
 
 from tests.strategies import int64_table_values, nesting_depth, worker_count
 
@@ -100,6 +100,26 @@ class _SchemaReentrantProvider(_ScanReentrantProvider):
 
     def schema(self):
         return self.src_ctx.sql(self.query).schema()
+
+
+class _TableMethodReentrantProvider:
+    """Re-enters via `src_ctx.table(name)` rather than `sql()`.
+
+    Exercises a different `wait_for_future` call site than the SQL path, so the
+    fix is shown to cover the entry point, not one specific method.
+    """
+
+    def __init__(self, src_ctx, table_name):
+        self.src_ctx = src_ctx
+        self.table_name = table_name
+        self._schema = _SCHEMA
+
+    def schema(self):
+        return self._schema
+
+    def scan(self, filters=None):
+        batches = self.src_ctx.table(self.table_name).collect()
+        return pa.RecordBatchReader.from_batches(self._schema, batches)
 
 
 class _RaisingScanProvider:
@@ -252,6 +272,121 @@ def test_concurrent_reentrant_scans(values, n):
             futs = [ex.submit(worker, i) for i in range(n)]
             done, pending = concurrent.futures.wait(futs, timeout=_TIMEOUT)
         assert not pending, f"{len(pending)} concurrent re-entrant scans timed out"
+        return [f.result() for f in done]
+
+    for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
+        assert _ids(rows) == expected
+
+
+@given(int64_table_values())
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_reentrant_via_table_method_returns_inner_rows(values):
+    """Re-entering through ctx.table() (a different wait_for_future call site
+    than sql()) still returns the inner rows."""
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+
+    outer = SessionContext()
+    outer.register_table_provider("r", _TableMethodReentrantProvider(inner, "inner_t"))
+
+    rows = _run_with_timeout(lambda: outer.sql("select * from r").collect())
+    assert _ids(rows) == collections.Counter(values)
+
+
+@given(int64_table_values())
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_outer_union_all_reenters_per_arm(values):
+    """An outer UNION ALL scans the re-entrant provider twice, so scan re-enters
+    twice within one outer block_on; every row must appear exactly twice."""
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+
+    outer = SessionContext()
+    outer.register_table_provider(
+        "r", _ScanReentrantProvider(inner, "select id from inner_t")
+    )
+
+    rows = _run_with_timeout(
+        lambda: outer.sql("select * from r UNION ALL select * from r").collect()
+    )
+    assert _ids(rows) == collections.Counter(values * 2)
+
+
+@given(int64_table_values())
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_reentrant_scan_via_outer_execute_stream(values):
+    """Driving the outer query through execute_stream (wait_for_completion +
+    spawn) instead of collect still re-enters cleanly and yields the inner rows."""
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+
+    outer = SessionContext()
+    outer.register_table_provider(
+        "r", _ScanReentrantProvider(inner, "select id from inner_t")
+    )
+
+    def run():
+        df = outer.sql("select * from r")
+        return [b.to_pyarrow() for b in df.execute_stream()]
+
+    assert _ids(_run_with_timeout(run)) == collections.Counter(values)
+
+
+@given(int64_table_values(max_rows=300))
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_udf_reentry_returns_inner_count(values):
+    """A scalar UDF whose body re-enters another context (a UDF callback site,
+    not a TableProvider) runs without a nested-runtime panic. Each output cell
+    equals the inner row count."""
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+
+    def body(arr):
+        n = inner.sql("select id from inner_t").count()
+        return pa.array([n] * len(arr), type=pa.int64())
+
+    fn = udf(
+        body,
+        input_types=[pa.int64()],
+        return_type=pa.int64(),
+        volatility="volatile",
+        name="reentry_udf",
+    )
+    outer = SessionContext()
+    _register_values(outer, "t", [1, 2, 3])
+    outer.register_udf(fn)
+
+    rows = _run_with_timeout(
+        lambda: outer.sql("select reentry_udf(id) v from t").collect()
+    )
+    table = pa.Table.from_batches(rows)
+    assert table.column("v").to_pylist() == [len(values)] * 3
+
+
+@given(int64_table_values(max_rows=500), worker_count)
+@settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_concurrent_reentry_shared_inner_ctx(values, n):
+    """N outer contexts re-enter one *shared* inner context concurrently. Beyond
+    the nested-runtime guarantee this stresses the inner context's shared (&self)
+    borrow under simultaneous nested block_on calls."""
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+    expected = collections.Counter(values)
+    barrier = threading.Barrier(n)
+
+    def worker(_idx):
+        outer = SessionContext()
+        outer.register_table_provider(
+            "r", _ScanReentrantProvider(inner, "select id from inner_t")
+        )
+        barrier.wait(timeout=_TIMEOUT)
+        return outer.sql("select * from r").collect()
+
+    def run():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+            futs = [ex.submit(worker, i) for i in range(n)]
+            done, pending = concurrent.futures.wait(futs, timeout=_TIMEOUT)
+        assert not pending, f"{len(pending)} shared-inner re-entrant scans timed out"
         return [f.result() for f in done]
 
     for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
