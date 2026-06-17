@@ -135,6 +135,69 @@ def int64_stream_data(draw, max_rows=5000):
 # interaction (interleaving), not in raw thread count.
 worker_count = st.integers(min_value=2, max_value=6)
 
+
+# ---------------------------------------------------------------------------
+# Composite: rows for a context that a re-entrant TableProvider.scan re-queries
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def int64_table_values(draw, max_rows=2000):
+    """A single int64 column's worth of rows registered in a context.
+
+    Models the data a re-entrant ``TableProvider.scan`` reads back out of
+    *another* ``SessionContext`` while the outer context is mid-``block_on``.
+    Values are tiled from a small *unique* base list so the multiset has
+    duplicates without large example sizes. Empty (``n_rows == 0``) is included:
+    it is the boundary where the inner scan yields zero batches.
+    """
+    n_rows = draw(st.integers(min_value=0, max_value=max_rows))
+    base = draw(
+        st.lists(
+            st.integers(min_value=-1000, max_value=1000),
+            min_size=1,
+            max_size=64,
+            unique=True,
+        )
+    )
+    return (base * (n_rows // len(base) + 1))[:n_rows]
+
+
+# Depth of a chain of re-entrant TableProviders: each provider's scan queries
+# the next context down, so a depth-k chain nests block_in_place k levels deep.
+# 1 = a single re-entry; >1 stresses repeated nesting.
+nesting_depth = st.integers(min_value=1, max_value=4)
+
+
+# ---------------------------------------------------------------------------
+# Composite: (ids, vals) for a self-joinable table backed by a StreamCache
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def unique_id_val_table(draw, max_rows=300):
+    """(ids, vals) where ids are unique int64 and vals are finite float64.
+
+    Unique ids mean a self-join on ``id`` yields exactly one match per row, so
+    a k-way self-join returns exactly ``len(ids)`` rows regardless of k. This
+    makes the row count an exact, k-independent oracle for the replay contract
+    of ``batchcorder``'s ``CastingStreamCache`` (a fresh reader per scan).
+
+    ``max_rows`` is modest because a self-join materialises pairs. Empty is
+    included: zero scans of zero rows must still join to zero rows.
+    """
+    n = draw(st.integers(min_value=0, max_value=max_rows))
+    ids = list(range(n))  # unique by construction
+    vals = draw(
+        st.lists(
+            st.floats(allow_nan=False, allow_infinity=False),
+            min_size=n,
+            max_size=n,
+        )
+    )
+    return ids, vals
+
+
 # LIMIT applied to a teardown query. 0 is valid SQL (empty result) and is a
 # distinct teardown path, so it is included.
 limit_value = st.integers(min_value=0, max_value=200)
