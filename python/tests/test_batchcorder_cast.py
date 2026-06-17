@@ -110,3 +110,74 @@ def test_cast_cache_preserves_aggregates(data):
     rb = ctx.sql("SELECT count(id) AS c, sum(id) AS s FROM t").collect()[0]
     assert rb.column("c")[0].as_py() == len(ids)
     assert rb.column("s")[0].as_py() == (sum(ids) if ids else None)
+
+
+class _StreamCacheProvider:
+    """A Python TableProvider backed by a batchcorder StreamCache.
+
+    Each scan returns a fresh reader (`cache.cast(schema)` yields one per call),
+    so DataFusion can scan the registered table more than once. This is the
+    provider-wraps-cache shape: replay lives in the cache, not in DataFusion.
+    """
+
+    def __init__(self, cache, schema):
+        self.cache = cache
+        self._schema = schema
+
+    def schema(self):
+        return self._schema
+
+    def scan(self, filters=None):
+        return pa.RecordBatchReader.from_stream(self.cache.cast(self._schema))
+
+
+def _stream_cache(ids, vals, batch_size):
+    """A replayable StreamCache over (id, val) rows."""
+
+    def _batches():
+        for start in range(0, len(ids), batch_size):
+            sl = slice(start, start + batch_size)
+            yield pa.record_batch(
+                {
+                    "id": pa.array(ids[sl], type=pa.int64()),
+                    "val": pa.array(vals[sl], type=pa.float64()),
+                },
+                schema=_SCHEMA,
+            )
+
+    return StreamCache(pa.RecordBatchReader.from_batches(_SCHEMA, _batches()))
+
+
+@given(unique_id_val_table())
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_provider_wrapping_streamcache_single_scan(data):
+    """A TableProvider that hands out cache-backed readers reproduces the source
+    rows on a single scan."""
+    ids, vals = data
+
+    ctx = SessionContext()
+    ctx.register_table_provider(
+        "t", _StreamCacheProvider(_stream_cache(ids, vals, 64), _SCHEMA)
+    )
+
+    rb = ctx.sql("SELECT count(id) AS c, sum(id) AS s FROM t").collect()[0]
+    assert rb.column("c")[0].as_py() == len(ids)
+    assert rb.column("s")[0].as_py() == (sum(ids) if ids else None)
+
+
+@given(unique_id_val_table())
+@settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_provider_wrapping_streamcache_self_join_replays(data):
+    """Self-joining the provider table calls scan twice; the wrapped StreamCache
+    must replay so the second scan still sees the full stream."""
+    ids, vals = data
+
+    ctx = SessionContext()
+    ctx.register_table_provider(
+        "t", _StreamCacheProvider(_stream_cache(ids, vals, 64), _SCHEMA)
+    )
+
+    rows = ctx.sql(
+        "SELECT count(*) AS c FROM t AS l JOIN t AS r ON l.id = r.id"
+    ).collect()
+    assert rows[0].column("c")[0].as_py() == len(ids)

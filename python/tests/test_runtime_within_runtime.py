@@ -24,16 +24,45 @@ rows the inner context would, at arbitrary data sizes and nesting depths.
 """
 
 import collections
+import concurrent.futures
+import threading
 
 import pyarrow as pa
+import pytest
 from hypothesis import HealthCheck, given, settings
 
 from xorq_datafusion import SessionContext
 
-from tests.strategies import int64_table_values, nesting_depth
+from tests.strategies import int64_table_values, nesting_depth, worker_count
 
 
 _SCHEMA = pa.schema([("id", pa.int64())])
+_TIMEOUT = 15
+
+
+def _run_with_timeout(fn, timeout=_TIMEOUT):
+    """Run fn on a daemon thread; fail (not hang) if it doesn't finish in time.
+
+    A nested-runtime regression would manifest as a hang, not a clean error, so
+    every test that drives a re-entrant scan goes through this guard.
+    """
+    done = threading.Event()
+    holder = {}
+
+    def _inner():
+        try:
+            holder["result"] = fn()
+        except Exception as exc:  # noqa: BLE001
+            holder["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_inner, daemon=True).start()
+    if not done.wait(timeout=timeout):
+        pytest.fail("timed out — likely nested-runtime hang or deadlock")
+    if "error" in holder:
+        raise holder["error"]
+    return holder["result"]
 
 
 def _register_values(ctx, name, values):
@@ -71,6 +100,19 @@ class _SchemaReentrantProvider(_ScanReentrantProvider):
 
     def schema(self):
         return self.src_ctx.sql(self.query).schema()
+
+
+class _RaisingScanProvider:
+    """Provider whose `scan` raises, from inside the outer context's block_on."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def schema(self):
+        return _SCHEMA
+
+    def scan(self, filters=None):
+        raise self.exc
 
 
 def _ids(rows):
@@ -146,3 +188,71 @@ def test_nested_reentrant_chain_preserves_rows(values, depth):
 
     rows = ctx.sql("select * from t").collect()
     assert _ids(rows) == collections.Counter(values)
+
+
+def _assert_runtime_still_usable():
+    """A fresh, unrelated query must succeed after a failed re-entrant scan —
+    a failure must not poison the shared runtime."""
+    ctx = SessionContext()
+    _register_values(ctx, "t", [1, 2, 3])
+    assert _ids(ctx.sql("select id from t").collect()) == collections.Counter([1, 2, 3])
+
+
+def test_reentrant_scan_exception_propagates():
+    """An exception raised inside scan (mid block_on) surfaces as a Python error,
+    does not hang, and leaves the runtime usable."""
+    outer = SessionContext()
+    outer.register_table_provider(
+        "boom", _RaisingScanProvider(RuntimeError("scan failed"))
+    )
+
+    with pytest.raises(Exception):
+        _run_with_timeout(lambda: outer.sql("select * from boom").collect())
+
+    _assert_runtime_still_usable()
+
+
+def test_reentrant_inner_query_error_propagates():
+    """If the re-entered inner query itself errors (bad SQL), the error surfaces
+    through the outer query without a hang, and the runtime stays usable."""
+    inner = SessionContext()
+    _register_values(inner, "inner_t", [1, 2, 3])
+
+    outer = SessionContext()
+    outer.register_table_provider(
+        "reentrant", _ScanReentrantProvider(inner, "select id from does_not_exist")
+    )
+
+    with pytest.raises(Exception):
+        _run_with_timeout(lambda: outer.sql("select * from reentrant").collect())
+
+    _assert_runtime_still_usable()
+
+
+@given(int64_table_values(max_rows=500), worker_count)
+@settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_concurrent_reentrant_scans(values, n):
+    """N threads each drive an independent re-entrant scan concurrently. Every
+    worker must return the correct rows with no nested-runtime hang."""
+    expected = collections.Counter(values)
+    barrier = threading.Barrier(n)
+
+    def worker(_idx):
+        inner = SessionContext()
+        _register_values(inner, "inner_t", values)
+        outer = SessionContext()
+        outer.register_table_provider(
+            "reentrant", _ScanReentrantProvider(inner, "select id from inner_t")
+        )
+        barrier.wait(timeout=_TIMEOUT)
+        return outer.sql("select * from reentrant").collect()
+
+    def run():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+            futs = [ex.submit(worker, i) for i in range(n)]
+            done, pending = concurrent.futures.wait(futs, timeout=_TIMEOUT)
+        assert not pending, f"{len(pending)} concurrent re-entrant scans timed out"
+        return [f.result() for f in done]
+
+    for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
+        assert _ids(rows) == expected
