@@ -53,9 +53,16 @@ where
     F: Send + Future,
     F::Output: Send,
 {
-    let guard = get_runtime().read().unwrap();
-    let runtime = guard.as_ref().expect("tokio runtime has been shut down");
-    py.detach(|| runtime.block_on(f))
+    let handle = get_tokio_handle();
+    py.detach(|| match Handle::try_current() {
+        // Already running inside the tokio runtime (e.g. a Python
+        // TableProvider.scan/schema that re-enters another SessionContext
+        // during an outer block_on). Calling block_on again would panic with
+        // "Cannot start a runtime from within a runtime", so hand the worker
+        // thread back to the scheduler via block_in_place first.
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
+        Err(_) => handle.block_on(f),
+    })
 }
 #[allow(clippy::redundant_async_block)]
 pub fn wait_for_completion<F>(py: Python, fut: F) -> F::Output
