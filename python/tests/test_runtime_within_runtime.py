@@ -363,6 +363,35 @@ def test_udf_reentry_returns_inner_count(values):
     assert table.column("v").to_pylist() == [len(values)] * 3
 
 
+@given(int64_table_values(max_rows=100), int64_table_values(max_rows=100))
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_join_two_reentrant_providers(values_a, values_b):
+    """An outer join of two *different* re-entrant providers re-enters two
+    distinct inner contexts within one outer block_on (the join sides may scan
+    in parallel). The match count must equal the exact join cardinality,
+    sum_k freq_a(k) * freq_b(k)."""
+    inner_a = SessionContext()
+    _register_values(inner_a, "t", values_a)
+    inner_b = SessionContext()
+    _register_values(inner_b, "t", values_b)
+
+    outer = SessionContext()
+    outer.register_table_provider(
+        "a", _ScanReentrantProvider(inner_a, "select id from t")
+    )
+    outer.register_table_provider(
+        "b", _ScanReentrantProvider(inner_b, "select id from t")
+    )
+
+    ca, cb = collections.Counter(values_a), collections.Counter(values_b)
+    expected = sum(ca[k] * cb[k] for k in ca)
+
+    rows = _run_with_timeout(
+        lambda: outer.sql("select count(*) c from a join b on a.id = b.id").collect()
+    )
+    assert rows[0].column("c")[0].as_py() == expected
+
+
 @given(int64_table_values(max_rows=500), worker_count)
 @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 def test_concurrent_reentry_shared_inner_ctx(values, n):
