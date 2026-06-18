@@ -4,7 +4,7 @@ import pytest
 from xorq_datafusion import udf
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ctx_df(ctx):
     # create a RecordBatch and a new DataFrame from it
     batch = pa.RecordBatch.from_arrays(

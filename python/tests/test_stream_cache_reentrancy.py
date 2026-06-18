@@ -26,8 +26,8 @@ import pyarrow as pa
 import pytest
 from hypothesis import HealthCheck, given, settings
 
+import xorq_datafusion as xdf
 from tests.strategies import int64_stream_data, limit_value, worker_count
-
 
 _TIMEOUT = 15
 _SCHEMA = pa.schema([("x", pa.int64())])
@@ -35,7 +35,8 @@ _SCHEMA = pa.schema([("x", pa.int64())])
 
 def _make_stream_cache(values, batch_size, *, max_readers=None):
     """StreamCache over a single int64 column, chunked into batch_size rows."""
-    from batchcorder import StreamCache
+    # Lazy import keeps batchcorder optional (callers guard with importorskip).
+    from batchcorder import StreamCache  # noqa: PLC0415
 
     def _batches():
         for start in range(0, len(values), batch_size):
@@ -58,7 +59,7 @@ def _run_with_timeout(fn, timeout=_TIMEOUT):
     def _inner():
         try:
             holder["result"] = fn()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             holder["error"] = exc
         finally:
             done.set()
@@ -86,8 +87,6 @@ def test_drop_view_during_reader_teardown_does_not_raise(data, limit):
     generator's `finally`, re-entering the same context.
     """
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     values, batch_size = data
     ctx = xdf.SessionContext()
     ctx.register_record_batch_reader("t", _make_stream_cache(values, batch_size))
@@ -127,8 +126,6 @@ def test_concurrent_sql_and_ddl_no_already_borrowed(data, n):
     wait while another re-borrows.
     """
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     values, batch_size = data
     expected_sum = sum(values) if values else None
     expected_cnt = len(values)
@@ -237,8 +234,6 @@ def test_max_readers_must_cover_scan_count():
     max_readers=2 succeeds.
     """
     pytest.importorskip("batchcorder")
-    import xorq_datafusion as xdf
-
     values = [0, 1, 2, 3, 4]
     union_all = "SELECT x FROM t UNION ALL SELECT x FROM t"
 
@@ -307,8 +302,6 @@ def test_bounded_fanout_through_independent_contexts(data, n):
     barrier = threading.Barrier(n)
 
     def worker(_idx):
-        import xorq_datafusion as xdf
-
         ctx = xdf.SessionContext()
         ctx.register_record_batch_reader("t", cache)
         barrier.wait(timeout=_TIMEOUT)

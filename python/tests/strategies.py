@@ -10,6 +10,9 @@ import uuid
 import pyarrow as pa
 from hypothesis import strategies as st
 
+import xorq_datafusion as xdf
+from xorq_datafusion import Accumulator
+
 # ---------------------------------------------------------------------------
 # Atomic: Arrow scalar types to test as UDF/UDAF return types
 # ---------------------------------------------------------------------------
@@ -221,7 +224,6 @@ def make_udf_func(return_type: pa.DataType):
 
 def make_accumulator_class(return_type: pa.DataType):
     """Dynamically create an Accumulator subclass for the given return type."""
-    from xorq_datafusion import Accumulator
 
     class DynAccumulator(Accumulator):
         def __init__(self):
@@ -258,8 +260,6 @@ def udf_dataframe(draw):
     Draws: return type, input batch shape.
     Returns: (ctx, df, return_type) — caller should not mutate ctx further.
     """
-    import xorq_datafusion as xdf
-
     return_type = draw(arrow_return_type)
     batch = draw(float64_record_batch())
     n_cols = batch.num_columns
@@ -290,8 +290,6 @@ def udaf_dataframe(draw):
 
     Returns: (ctx, df, return_type).
     """
-    import xorq_datafusion as xdf
-
     return_type = draw(arrow_return_type)
     batch = draw(float64_record_batch(min_cols=1, max_cols=1))
     uid = uuid.uuid4().hex[:8]

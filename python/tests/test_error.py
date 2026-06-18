@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+import re
+import traceback
 from operator import methodcaller
 
 import pyarrow as pa
@@ -32,7 +35,7 @@ class ErrorSummarize(Accumulator):
         raise Exception
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ctx_with_table(ctx):
     # create a RecordBatch and a new DataFrame from it
     batch = pa.RecordBatch.from_arrays(
@@ -44,10 +47,6 @@ def ctx_with_table(ctx):
 
 
 def has_stacktrace(e, pattern=None):
-    import re
-    import traceback
-    import io
-
     buffer = io.StringIO()
     traceback.print_exception(e, file=buffer)
 
@@ -73,7 +72,9 @@ def test_udaf_aggregate(ctx_with_table, execute_method):
 
     df1 = ctx_with_table.sql("select error_summarize(a) from test_table")
 
-    with pytest.raises(Exception) as error:
+    # The UDAF raises a bare ``Exception`` with no message; the assertion below
+    # checks it propagates with a usable stacktrace, so the type/match stay broad.
+    with pytest.raises(Exception) as error:  # noqa: PT011
         execute_method(df1)
 
     assert has_stacktrace(error.value, pattern=r"in\s+evaluate")

@@ -30,7 +30,7 @@ class Summarize(Accumulator):
         return self._sum
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ctx_with_table(ctx):
     # create a RecordBatch and a new DataFrame from it
     batch = pa.RecordBatch.from_arrays(

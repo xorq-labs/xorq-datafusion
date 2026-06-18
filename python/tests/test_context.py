@@ -1,3 +1,6 @@
+from urllib.request import Request, urlopen
+from uuid import uuid4
+
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pytest
@@ -271,9 +274,7 @@ def test_table_exist(ctx):
 
 
 def test_table_not_found(ctx):
-    from uuid import uuid4
-
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="No table named"):
         ctx.table(f"not-found-{uuid4()}")
 
 
@@ -377,8 +378,6 @@ def test_large_batting_self_join_limit(ctx):
 
 
 def test_get_object_metadata_https(ctx):
-    from urllib.request import Request, urlopen
-
     url = "https://raw.githubusercontent.com/ibis-project/testing-data/refs/heads/master/csv/astronauts.csv"
 
     metadata = ctx.get_object_metadata(url, "csv")

@@ -3,8 +3,7 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from xorq_datafusion import WindowEvaluator
-from xorq_datafusion import udwf
+from xorq_datafusion import WindowEvaluator, udwf
 
 
 @pytest.fixture

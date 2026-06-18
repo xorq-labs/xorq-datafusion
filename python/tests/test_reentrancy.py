@@ -16,12 +16,11 @@ import threading
 import pyarrow as pa
 import pytest
 
+from tests.strategies import make_accumulator_class, make_udf_func
 from xorq_datafusion import SessionContext, WindowEvaluator, udaf, udf, udwf
 
-from tests.strategies import make_accumulator_class, make_udf_func
 
-
-@pytest.fixture(scope="function")
+@pytest.fixture
 def ctx_with_table():
     ctx = SessionContext()
     batch = pa.record_batch({"user_id": [1, 2, 3], "amount": [10.0, 20.0, 30.0]})
@@ -73,7 +72,7 @@ def test_concurrent_sql_on_shared_context(ctx_with_table):
                 ctx.sql(
                     "SELECT user_id, sum(amount) FROM src GROUP BY user_id"
                 ).collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(e)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
@@ -252,7 +251,7 @@ def test_modified_method_concurrent_with_live_sql(invoke, data_dir):
         try:
             while not stop.is_set():
                 ctx.sql("SELECT sum(x) FROM base").collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(("sql", e))
 
     spinners = [threading.Thread(target=spin, daemon=True) for _ in range(3)]
@@ -263,7 +262,7 @@ def test_modified_method_concurrent_with_live_sql(invoke, data_dir):
         try:
             for i in range(20):
                 invoke(ctx, f"m_{tid}_{i}", data_dir)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(("method", e))
 
     try:

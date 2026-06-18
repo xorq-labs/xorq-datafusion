@@ -18,10 +18,8 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from xorq_datafusion import SessionContext
-
 from tests.strategies import unique_id_val_table
-
+from xorq_datafusion import SessionContext
 
 StreamCache = pytest.importorskip("batchcorder").StreamCache
 
