@@ -125,6 +125,32 @@ class _TableMethodReentrantProvider:
         return pa.RecordBatchReader.from_batches(self._schema, batches)
 
 
+class _ExecuteStreamReentrantProvider:
+    """
+    Re-enters via `src_ctx.sql(query).execute_stream()` rather than `collect()`.
+
+    `execute_stream` blocks through `wait_for_completion` (a different call site
+    than the `wait_for_future` path that `collect`/`table`/`sql` use). It spawns
+    the inner query onto the shared runtime and then parks the current worker on
+    the resulting JoinHandle; without a `block_in_place` handoff that worker is
+    not freed to drive the spawned task, so concurrent re-entries here can
+    starve the runtime of workers and hang.
+    """
+
+    def __init__(self, src_ctx, query):
+        self.src_ctx = src_ctx
+        self.query = query
+        self._schema = _SCHEMA
+
+    def schema(self):
+        return self._schema
+
+    def scan(self, filters=None):
+        stream = self.src_ctx.sql(self.query).execute_stream()
+        batches = [b.to_pyarrow() for b in stream]
+        return pa.RecordBatchReader.from_batches(self._schema, batches)
+
+
 class _RaisingScanProvider:
     """Provider whose `scan` raises, from inside the outer context's block_on."""
 
@@ -465,6 +491,59 @@ def test_concurrent_reentry_shared_inner_ctx(values, n):
             futs = [ex.submit(worker, i) for i in range(n)]
             done, pending = concurrent.futures.wait(futs, timeout=_TIMEOUT)
         assert not pending, f"{len(pending)} shared-inner re-entrant scans timed out"
+        return [f.result() for f in done]
+
+    for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
+        assert _ids(rows) == expected
+
+
+@given(int64_table_values())
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_reentrant_via_execute_stream_returns_inner_rows(values):
+    """
+    Re-entering through execute_stream (the wait_for_completion call site, not
+    wait_for_future) still returns the inner rows without a nested-runtime hang.
+    """
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+
+    outer = SessionContext()
+    outer.register_table_provider(
+        "r", _ExecuteStreamReentrantProvider(inner, "select id from inner_t")
+    )
+
+    rows = _run_with_timeout(lambda: outer.sql("select * from r").collect())
+    assert _ids(rows) == collections.Counter(values)
+
+
+@given(int64_table_values(max_rows=500), worker_count)
+@settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_concurrent_reentry_via_execute_stream(values, n):
+    """
+    N outer contexts concurrently re-enter a shared inner context via
+    execute_stream (the wait_for_completion call site). Every worker must return
+    the correct rows with no nested-runtime hang. The timeout guard turns a
+    worker-starvation regression on this path into a fast failure rather than a
+    stalled suite.
+    """
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+    expected = collections.Counter(values)
+    barrier = threading.Barrier(n)
+
+    def worker(_idx):
+        outer = SessionContext()
+        outer.register_table_provider(
+            "r", _ExecuteStreamReentrantProvider(inner, "select id from inner_t")
+        )
+        barrier.wait(timeout=_TIMEOUT)
+        return outer.sql("select * from r").collect()
+
+    def run():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+            futs = [ex.submit(worker, i) for i in range(n)]
+            done, pending = concurrent.futures.wait(futs, timeout=_TIMEOUT)
+        assert not pending, f"{len(pending)} execute_stream re-entries timed out"
         return [f.result() for f in done]
 
     for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
