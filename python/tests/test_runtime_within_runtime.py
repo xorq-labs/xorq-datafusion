@@ -26,6 +26,9 @@ rows the inner context would, at arbitrary data sizes and nesting depths.
 
 import collections
 import concurrent.futures
+import os
+import subprocess
+import sys
 import threading
 
 import pyarrow as pa
@@ -548,6 +551,82 @@ def test_concurrent_reentry_via_execute_stream(values, n):
 
     for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
         assert _ids(rows) == expected
+
+
+# Child program for the deterministic worker-starvation regression below.
+#
+# It pins itself to a single CPU *before* importing xorq_datafusion: the
+# process-wide tokio runtime sizes its worker pool from available_parallelism()
+# on first use, so one visible CPU means one worker. A multi-partition outer
+# query makes CoalescePartitionsExec spawn the per-partition ProjectionExec
+# (which runs the UDF) onto that worker; the UDF re-enters another context via
+# execute_stream, whose block site (`wait_for_completion`) parks the worker.
+# Without the block_in_place handoff there is no thread left to drive the
+# spawned inner task, so the query deadlocks -> the parent times out.
+_STARVATION_CHILD = """
+import os
+try:
+    os.sched_setaffinity(0, {sorted(os.sched_getaffinity(0))[0]})
+except (AttributeError, OSError):
+    print("SKIP"); raise SystemExit(0)
+
+import pyarrow as pa
+from xorq_datafusion import SessionContext, udf
+
+schema = pa.schema([("id", pa.int64())])
+inner = SessionContext()
+inner.register_record_batches(
+    "inner_t",
+    [[pa.record_batch({"id": pa.array([1, 2, 3], type=pa.int64())}, schema=schema)]],
+)
+
+def body(arr):
+    stream = inner.sql("select id from inner_t").execute_stream()
+    n = sum(len(b.to_pyarrow()) for b in stream)
+    return pa.array([n] * len(arr), type=pa.int64())
+
+fn = udf(body, input_types=[pa.int64()], return_type=pa.int64(),
+         volatility="volatile", name="rs_udf")
+
+outer = SessionContext()
+outer.register_record_batches(
+    "t",
+    [[pa.record_batch({"id": pa.array([i], type=pa.int64())}, schema=schema)]
+     for i in range(4)],
+)
+outer.register_udf(fn)
+rows = outer.sql("select rs_udf(id) v from t").collect()
+print("OK", sum(len(b) for b in rows))
+"""
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "sched_setaffinity"),
+    reason="needs sched_setaffinity to pin the runtime to one worker",
+)
+def test_reentrant_execute_stream_single_worker_does_not_deadlock():
+    """
+    Deterministic worker-starvation regression for the wait_for_completion path.
+
+    Runs in a fresh subprocess pinned to one CPU (one tokio worker) so that a
+    multi-partition UDF that re-enters via execute_stream parks the only worker.
+    Before the block_in_place handoff in wait_for_completion this deadlocks;
+    the subprocess timeout turns that hang into a test failure.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _STARVATION_CHILD],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("re-entrant execute_stream deadlocked the single-worker runtime")
+
+    if "SKIP" in proc.stdout:
+        pytest.skip("could not restrict CPU affinity in the child process")
+    assert proc.returncode == 0, f"child failed: {proc.stderr}"
+    assert "OK 4" in proc.stdout, proc.stdout
 
 
 # ---------------------------------------------------------------------------
