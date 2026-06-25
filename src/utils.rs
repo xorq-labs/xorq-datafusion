@@ -64,26 +64,6 @@ where
         Err(_) => handle.block_on(f),
     })
 }
-pub fn wait_for_completion<F>(py: Python, fut: F) -> F::Output
-where
-    F: Send + Future,
-    F::Output: Send,
-{
-    py.detach(|| match Handle::try_current() {
-        // Re-entrant case: we are already running inside the tokio runtime
-        // (e.g. a Python UDF or TableProvider.scan that reached back into a
-        // SessionContext and hit execute_stream). `fut` is typically a
-        // JoinHandle for a task already spawned on this same runtime; parking
-        // the worker with a plain executor would leave no thread free to drive
-        // that task, so hand the worker's core back to the scheduler via
-        // block_in_place before blocking. Mirrors `wait_for_future`.
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-        // Top-level case: not on a runtime thread, so the spawned task runs on
-        // the runtime's workers while this thread parks on the future.
-        Err(_) => futures::executor::block_on(fut),
-    })
-}
-
 pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionError> {
     Ok(match value {
         "immutable" => Volatility::Immutable,
