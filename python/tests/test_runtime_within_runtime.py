@@ -22,6 +22,18 @@ The fix detects the in-runtime case via `Handle::try_current()` and uses
 `tokio::task::block_in_place` + `Handle::block_on` instead of nesting a runtime.
 These tests pin the resulting contract: a re-entrant provider returns the same
 rows the inner context would, at arbitrary data sizes and nesting depths.
+
+Second failure mode: worker-starvation deadlock
+------------------------------------------------
+`DataFrame.execute_stream` blocks through `wait_for_completion` rather than
+`wait_for_future`. It spawns the work onto the shared runtime and parks the
+current thread on the resulting `JoinHandle`. When that thread is itself a
+tokio worker (e.g. a UDF running on a partition task spawned by
+`CoalescePartitionsExec`) and it re-enters via `execute_stream`, parking it
+without a `block_in_place` handoff leaves no thread to drive the spawned task.
+Enough such parked workers and the runtime deadlocks -- a silent hang, not the
+panic above. `wait_for_completion` was given the same `Handle::try_current()` +
+`block_in_place` treatment; the tests below pin that this path no longer hangs.
 """
 
 import collections
@@ -519,85 +531,11 @@ def test_reentrant_via_execute_stream_returns_inner_rows(values):
     assert _ids(rows) == collections.Counter(values)
 
 
-@given(int64_table_values(max_rows=500), worker_count)
-@settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-def test_concurrent_reentry_via_execute_stream(values, n):
-    """
-    N outer contexts concurrently re-enter a shared inner context via
-    execute_stream (the wait_for_completion call site). Every worker must return
-    the correct rows with no nested-runtime hang. The timeout guard turns a
-    worker-starvation regression on this path into a fast failure rather than a
-    stalled suite.
-    """
-    inner = SessionContext()
-    _register_values(inner, "inner_t", values)
-    expected = collections.Counter(values)
-    barrier = threading.Barrier(n)
-
-    def worker(_idx):
-        outer = SessionContext()
-        outer.register_table_provider(
-            "r", _ExecuteStreamReentrantProvider(inner, "select id from inner_t")
-        )
-        barrier.wait(timeout=_TIMEOUT)
-        return outer.sql("select * from r").collect()
-
-    def run():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
-            futs = [ex.submit(worker, i) for i in range(n)]
-            done, pending = concurrent.futures.wait(futs, timeout=_TIMEOUT)
-        assert not pending, f"{len(pending)} execute_stream re-entries timed out"
-        return [f.result() for f in done]
-
-    for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
-        assert _ids(rows) == expected
-
-
-# Child program for the deterministic worker-starvation regression below.
-#
-# It pins itself to a single CPU *before* importing xorq_datafusion: the
-# process-wide tokio runtime sizes its worker pool from available_parallelism()
-# on first use, so one visible CPU means one worker. A multi-partition outer
-# query makes CoalescePartitionsExec spawn the per-partition ProjectionExec
-# (which runs the UDF) onto that worker; the UDF re-enters another context via
-# execute_stream, whose block site (`wait_for_completion`) parks the worker.
-# Without the block_in_place handoff there is no thread left to drive the
-# spawned inner task, so the query deadlocks -> the parent times out.
-_STARVATION_CHILD = """
-import os
-try:
-    os.sched_setaffinity(0, {sorted(os.sched_getaffinity(0))[0]})
-except (AttributeError, OSError):
-    print("SKIP"); raise SystemExit(0)
-
-import pyarrow as pa
-from xorq_datafusion import SessionContext, udf
-
-schema = pa.schema([("id", pa.int64())])
-inner = SessionContext()
-inner.register_record_batches(
-    "inner_t",
-    [[pa.record_batch({"id": pa.array([1, 2, 3], type=pa.int64())}, schema=schema)]],
+# Runs as a subprocess (see below) because the runtime's worker count must be
+# fixed before it is first built, which only a fresh process can do.
+_STARVATION_CHILD = os.path.join(
+    os.path.dirname(__file__), "_reentrant_starvation_child.py"
 )
-
-def body(arr):
-    stream = inner.sql("select id from inner_t").execute_stream()
-    n = sum(len(b.to_pyarrow()) for b in stream)
-    return pa.array([n] * len(arr), type=pa.int64())
-
-fn = udf(body, input_types=[pa.int64()], return_type=pa.int64(),
-         volatility="volatile", name="rs_udf")
-
-outer = SessionContext()
-outer.register_record_batches(
-    "t",
-    [[pa.record_batch({"id": pa.array([i], type=pa.int64())}, schema=schema)]
-     for i in range(4)],
-)
-outer.register_udf(fn)
-rows = outer.sql("select rs_udf(id) v from t").collect()
-print("OK", sum(len(b) for b in rows))
-"""
 
 
 @pytest.mark.skipif(
@@ -615,7 +553,7 @@ def test_reentrant_execute_stream_single_worker_does_not_deadlock():
     """
     try:
         proc = subprocess.run(
-            [sys.executable, "-c", _STARVATION_CHILD],
+            [sys.executable, _STARVATION_CHILD],
             capture_output=True,
             text=True,
             timeout=_TIMEOUT,
