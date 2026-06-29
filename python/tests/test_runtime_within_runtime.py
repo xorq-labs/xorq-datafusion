@@ -22,10 +22,25 @@ The fix detects the in-runtime case via `Handle::try_current()` and uses
 `tokio::task::block_in_place` + `Handle::block_on` instead of nesting a runtime.
 These tests pin the resulting contract: a re-entrant provider returns the same
 rows the inner context would, at arbitrary data sizes and nesting depths.
+
+Second failure mode: worker-starvation deadlock
+------------------------------------------------
+`DataFrame.execute_stream` blocks through `wait_for_completion` rather than
+`wait_for_future`. It spawns the work onto the shared runtime and parks the
+current thread on the resulting `JoinHandle`. When that thread is itself a
+tokio worker (e.g. a UDF running on a partition task spawned by
+`CoalescePartitionsExec`) and it re-enters via `execute_stream`, parking it
+without a `block_in_place` handoff leaves no thread to drive the spawned task.
+Enough such parked workers and the runtime deadlocks -- a silent hang, not the
+panic above. `wait_for_completion` was given the same `Handle::try_current()` +
+`block_in_place` treatment; the tests below pin that this path no longer hangs.
 """
 
 import collections
 import concurrent.futures
+import os
+import subprocess
+import sys
 import threading
 
 import pyarrow as pa
@@ -122,6 +137,32 @@ class _TableMethodReentrantProvider:
 
     def scan(self, filters=None):
         batches = self.src_ctx.table(self.table_name).collect()
+        return pa.RecordBatchReader.from_batches(self._schema, batches)
+
+
+class _ExecuteStreamReentrantProvider:
+    """
+    Re-enters via `src_ctx.sql(query).execute_stream()` rather than `collect()`.
+
+    `execute_stream` blocks through `wait_for_completion` (a different call site
+    than the `wait_for_future` path that `collect`/`table`/`sql` use). It spawns
+    the inner query onto the shared runtime and then parks the current worker on
+    the resulting JoinHandle; without a `block_in_place` handoff that worker is
+    not freed to drive the spawned task, so concurrent re-entries here can
+    starve the runtime of workers and hang.
+    """
+
+    def __init__(self, src_ctx, query):
+        self.src_ctx = src_ctx
+        self.query = query
+        self._schema = _SCHEMA
+
+    def schema(self):
+        return self._schema
+
+    def scan(self, filters=None):
+        stream = self.src_ctx.sql(self.query).execute_stream()
+        batches = [b.to_pyarrow() for b in stream]
         return pa.RecordBatchReader.from_batches(self._schema, batches)
 
 
@@ -469,6 +510,61 @@ def test_concurrent_reentry_shared_inner_ctx(values, n):
 
     for rows in _run_with_timeout(run, timeout=_TIMEOUT * 2):
         assert _ids(rows) == expected
+
+
+@given(int64_table_values())
+@settings(max_examples=30, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+def test_reentrant_via_execute_stream_returns_inner_rows(values):
+    """
+    Re-entering through execute_stream (the wait_for_completion call site, not
+    wait_for_future) still returns the inner rows without a nested-runtime hang.
+    """
+    inner = SessionContext()
+    _register_values(inner, "inner_t", values)
+
+    outer = SessionContext()
+    outer.register_table_provider(
+        "r", _ExecuteStreamReentrantProvider(inner, "select id from inner_t")
+    )
+
+    rows = _run_with_timeout(lambda: outer.sql("select * from r").collect())
+    assert _ids(rows) == collections.Counter(values)
+
+
+# Runs as a subprocess (see below) because the runtime's worker count must be
+# fixed before it is first built, which only a fresh process can do.
+_STARVATION_CHILD = os.path.join(
+    os.path.dirname(__file__), "_reentrant_starvation_child.py"
+)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "sched_setaffinity"),
+    reason="needs sched_setaffinity to pin the runtime to one worker",
+)
+def test_reentrant_execute_stream_single_worker_does_not_deadlock():
+    """
+    Deterministic worker-starvation regression for the wait_for_completion path.
+
+    Runs in a fresh subprocess pinned to one CPU (one tokio worker) so that a
+    multi-partition UDF that re-enters via execute_stream parks the only worker.
+    Before the block_in_place handoff in wait_for_completion this deadlocks;
+    the subprocess timeout turns that hang into a test failure.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, _STARVATION_CHILD],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("re-entrant execute_stream deadlocked the single-worker runtime")
+
+    if "SKIP" in proc.stdout:
+        pytest.skip("could not restrict CPU affinity in the child process")
+    assert proc.returncode == 0, f"child failed: {proc.stderr}"
+    assert "OK 4" in proc.stdout, proc.stdout
 
 
 # ---------------------------------------------------------------------------

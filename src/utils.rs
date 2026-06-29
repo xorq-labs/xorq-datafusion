@@ -64,15 +64,6 @@ where
         Err(_) => handle.block_on(f),
     })
 }
-#[allow(clippy::redundant_async_block)]
-pub fn wait_for_completion<F>(py: Python, fut: F) -> F::Output
-where
-    F: Send + Future,
-    F::Output: Send,
-{
-    py.detach(|| futures::executor::block_on(async move { fut.await }))
-}
-
 pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionError> {
     Ok(match value {
         "immutable" => Volatility::Immutable,
