@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.10] - 2026-07-02
+### Details
+#### Fixed
+- Avoid nested runtime panic in wait_for_future by @mesejo in [#41](https://github.com/xorq-labs/xorq-datafusion/pull/41)
+- Resolve ruff check violations across package and tests by @mesejo in [#42](https://github.com/xorq-labs/xorq-datafusion/pull/42)
+- Unify execute_stream onto wait_for_future re-entry handoff by @dlovell in [#43](https://github.com/xorq-labs/xorq-datafusion/pull/43)
+
 ## [0.2.9] - 2026-06-09
 ### Details
 #### Fixed
