@@ -1,71 +1,28 @@
 use std::any::Any;
 use std::fmt::Formatter;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::thread;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-use arrow::error::ArrowError;
 use arrow::pyarrow::PyArrowType;
-use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::project_schema;
-use futures::{Stream, TryStreamExt};
+use datafusion_common::DataFusionError as InnerDataFusionError;
+use futures::stream;
 use pyo3::types::PyIterator;
-use pyo3::{Bound, PyAny, Python};
+use pyo3::{Bound, Py, PyAny, Python};
 
 use crate::errors::DataFusionError;
 use crate::utils::compute_properties;
 
 use pyo3::prelude::*;
 
-struct RecordBatchReaderAdapter {
-    record_batch_reader: Py<PyAny>,
-    columns: Option<Vec<String>>,
-}
-
-impl Stream for RecordBatchReaderAdapter {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        thread::scope(|s| {
-            let res = s
-                .spawn(move || {
-                    let option = Python::attach(|py| {
-                        let batches = self.record_batch_reader.bind(py);
-                        let mut batches = PyIterator::from_object(batches).unwrap();
-                        Some(
-                            batches
-                                .next()?
-                                .and_then(|batch| {
-                                    let record_batch = batch
-                                        .call_method1("select", (self.columns.clone().unwrap(),));
-                                    let record_batch: RecordBatch =
-                                        record_batch?.extract::<PyArrowType<_>>()?.0;
-                                    Ok(record_batch)
-                                })
-                                .map_err(|err| ArrowError::ExternalError(Box::new(err))),
-                        )
-                    });
-
-                    match option {
-                        Some(Ok(value)) => Poll::Ready(Some(Ok(value))),
-                        _ => Poll::Ready(None),
-                    }
-                })
-                .join();
-
-            match res {
-                Ok(val) => val,
-                _ => Poll::Ready(None),
-            }
-        })
-    }
-}
+/// Batches buffered in the channel between the blocking reader thread and the
+/// async stream consumer.  Limits memory while allowing the reader to stay one
+/// step ahead of the consumer.
+const CHANNEL_CAPACITY: usize = 8;
 
 #[derive(Debug)]
 pub struct IbisTableExec {
@@ -155,18 +112,70 @@ impl ExecutionPlan for IbisTableExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> datafusion_common::Result<SendableRecordBatchStream> {
-        Python::attach(|py| {
-            let record_batches = RecordBatchReaderAdapter {
-                record_batch_reader: self.record_batch_reader.clone_ref(py),
-                columns: self.columns.clone(),
+        let schema = self.schema.clone();
+        let columns = self.columns.clone();
+        let record_batch_reader = Python::attach(|py| self.record_batch_reader.clone_ref(py));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
+
+        // One blocking thread owns the Python reader for the entire stream
+        // lifetime and drains it batch-by-batch. Running the pull on the blocking
+        // pool (never an async worker) is what keeps re-entrant providers safe:
+        // when this reader is a Python `scan()` generator that itself re-enters
+        // `execute_stream`, the nested block_on lands on a blocking thread and the
+        // inner query still finds a free worker, so a chain deeper than the worker
+        // count cannot starve the runtime. The GIL is acquired and released once
+        // per batch, before blocking_send, so other Python threads can run while
+        // the async consumer catches up.
+        tokio::task::spawn_blocking(move || {
+            let iter = match Python::attach(|py| {
+                PyIterator::from_object(record_batch_reader.bind(py)).map(|it| it.unbind())
+            }) {
+                Ok(it) => it,
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(InnerDataFusionError::External(Box::new(e))));
+                    return;
+                }
             };
 
-            let record_batch_stream: SendableRecordBatchStream =
-                Box::pin(RecordBatchStreamAdapter::new(
-                    self.schema.clone(),
-                    record_batches.map_err(|e| e.into()),
-                ));
-            Ok(record_batch_stream)
-        })
+            loop {
+                // GIL released when the Python::attach closure returns, before
+                // blocking_send. A re-entrant reader releases it again internally
+                // (via wait_for_future's py.detach) while it drains its own nested
+                // stream, so the nested runtime work never holds the GIL here.
+                let next = Python::attach(|py| {
+                    let mut bound_iter = iter.clone_ref(py).into_bound(py);
+                    bound_iter.next().map(|res| {
+                        res.and_then(|batch| {
+                            let batch = match &columns {
+                                Some(cols) => batch.call_method1("select", (cols.clone(),))?,
+                                None => batch,
+                            };
+                            Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0)
+                        })
+                        .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
+                    })
+                });
+
+                match next {
+                    None => break,
+                    Some(Err(e)) => {
+                        let _ = tx.blocking_send(Err(e));
+                        break;
+                    }
+                    Some(Ok(rb)) => {
+                        if tx.blocking_send(Ok(rb)).is_err() {
+                            break; // receiver dropped — query cancelled
+                        }
+                    }
+                }
+            }
+        });
+
+        let stream = stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }

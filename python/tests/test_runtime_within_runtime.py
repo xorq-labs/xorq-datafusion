@@ -39,6 +39,7 @@ panic above. `wait_for_completion` was given the same `Handle::try_current()` +
 import collections
 import concurrent.futures
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -537,6 +538,10 @@ _STARVATION_CHILD = os.path.join(
     os.path.dirname(__file__), "_reentrant_starvation_child.py"
 )
 
+_STREAM_CHAIN_CHILD = os.path.join(
+    os.path.dirname(__file__), "_reentrant_stream_chain_child.py"
+)
+
 
 @pytest.mark.skipif(
     not hasattr(os, "sched_setaffinity"),
@@ -565,6 +570,55 @@ def test_reentrant_execute_stream_single_worker_does_not_deadlock():
         pytest.skip("could not restrict CPU affinity in the child process")
     assert proc.returncode == 0, f"child failed: {proc.stderr}"
     assert "OK 4" in proc.stdout, proc.stdout
+
+
+# Fail fast: the child's success path is well under a second, so a chain that
+# takes this long has deadlocked. Kept short so the regression fails quickly.
+_STREAM_CHAIN_TIMEOUT = 10
+
+
+def _expected_stream_chain_checksum(depth, base=(1, 2, 3, 4, 5)):
+    """Sum over every cell of the depth-level chain result (a plus x{i}=a+i)."""
+    total = sum(base)  # column a
+    for i in range(depth):
+        total += sum(v + i for v in base)  # column x{i}
+    return total
+
+
+def test_reentrant_stream_chain_low_cores_does_not_deadlock():
+    """
+    Worker-starvation regression for the streaming re-entrant-provider chain.
+
+    Runs in a fresh subprocess (see _reentrant_stream_chain_child) that sizes a
+    chain of providers -- each scan() drains a nested execute_stream -- to
+    workers + 2, and drives the top with execute_stream. Because depth exceeds
+    the worker count, a scan that blocks a worker without a core handoff (the
+    pre-fix thread::scope/join in ibis_table_exec) leaves no worker to drive the
+    deepest level and the outer query hangs; the spawn_blocking reader keeps it
+    green. The out-of-process timeout turns a hang into a fast failure, and the
+    child re-checks the exact streamed rows so a silent wrong-result regression
+    also fails.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, _STREAM_CHAIN_CHILD],
+            capture_output=True,
+            text=True,
+            timeout=_STREAM_CHAIN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("re-entrant execute_stream chain deadlocked the runtime")
+
+    if "SKIP" in proc.stdout:
+        pytest.skip("need >= 2 tokio workers to reproduce the starvation")
+    assert proc.returncode == 0, f"child failed: {proc.stderr}"
+
+    match = re.search(r"OK depth=(\d+) rows=(\d+) checksum=(\d+)", proc.stdout)
+    assert match, f"unexpected child output: {proc.stdout!r} / {proc.stderr}"
+    depth, rows, checksum = (int(match.group(i)) for i in (1, 2, 3))
+    assert depth >= 3, f"chain too shallow to guard the regression: depth={depth}"
+    assert rows == 5, proc.stdout
+    assert checksum == _expected_stream_chain_checksum(depth), proc.stdout
 
 
 # ---------------------------------------------------------------------------

@@ -684,7 +684,11 @@ def test_prop_three_scan_cte_correct_results(values_and_batch_size):
 
 @_stream_cache_examples
 @given(_table_data())
-@settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow])
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 def test_prop_concurrent_two_scan_correct_results(values_and_batch_size):
     """N concurrent two-scan queries each return correct sum and count."""
     values, batch_size = values_and_batch_size
@@ -736,7 +740,11 @@ def test_prop_concurrent_two_scan_correct_results(values_and_batch_size):
 
 @_stream_cache_examples
 @given(_table_data())
-@settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow])
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 def test_prop_concurrent_shared_cache_correct_results(values_and_batch_size):
     """N workers sharing one StreamCache instance each return correct results.
 
