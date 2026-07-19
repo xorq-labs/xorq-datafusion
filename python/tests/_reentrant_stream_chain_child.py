@@ -30,14 +30,18 @@ Beyond "did not hang" it re-materialises the streamed result and checks the
 exact rows -- each level adds ``x{i} = a + i`` -- so a silent wrong-result
 regression in the spawn_blocking reader / channel / projection path also fails.
 
-Drive mode
-----------
+Drive mode / shape
+------------------
 ``argv[1]`` selects how the *outer* query is consumed: ``stream`` (default),
 ``partitioned`` (``execute_stream_partitioned``), or ``collect``. All three
 deadlock before the fix -- the nested per-level polls run on workers regardless
 of how the top is drained -- so each exercises a distinct outer bridge
 (``execute_stream`` / ``execute_stream_partitioned`` / ``collect``) over the
 same starvation setup.
+
+``argv[2]`` selects the plan shape: ``chain`` (default, one linear chain) or
+``join`` (two independent chains joined on ``a``, so a multi-child plan
+re-enters once per side within a single outer query).
 
 Output contract
 ---------------
@@ -102,24 +106,55 @@ def main():
 
     base_values = [1, 2, 3, 4, 5]
     ctx = SessionContext()
-    base = pa.record_batch({"a": pa.array(base_values, pa.int64())})
-    ctx.register_record_batches("base", [[base]])
 
-    schema = base.schema
-    name = "base"
-    for i in range(depth):
-        next_name = f"lvl{i}"
-        col = f"x{i}"
-        schema = schema.append(pa.field(col, pa.int64()))
-        provider = SqlReentrantProvider(
-            ctx, f"SELECT *, a + {i} AS {col} FROM {name}", schema
-        )
-        ctx.deregister_table(next_name)
-        ctx.register_table_provider(next_name, provider)
-        name = next_name
+    def build_chain(prefix, colprefix):
+        """Register a base table + ``depth`` re-entrant levels; return top name.
+
+        Each level adds ``{colprefix}{i} = a + i``. ``prefix`` namespaces the
+        table names so several chains can live in one context (for the join
+        shape). The expected value of every added column is ``a + i``.
+        """
+        base = pa.record_batch({"a": pa.array(base_values, pa.int64())})
+        ctx.register_record_batches(f"{prefix}base", [[base]])
+        schema = base.schema
+        name = f"{prefix}base"
+        for i in range(depth):
+            col = f"{colprefix}{i}"
+            schema = schema.append(pa.field(col, pa.int64()))
+            next_name = f"{prefix}lvl{i}"
+            ctx.deregister_table(next_name)
+            ctx.register_table_provider(
+                next_name,
+                SqlReentrantProvider(
+                    ctx, f"SELECT *, a + {i} AS {col} FROM {name}", schema
+                ),
+            )
+            name = next_name
+        return name
 
     drive = sys.argv[1] if len(sys.argv) > 1 else "stream"
-    frame = ctx.sql(f"SELECT * FROM {name}")
+    shape = sys.argv[2] if len(sys.argv) > 2 else "chain"
+
+    # Expected columns: a, plus the per-level added columns. The join shape
+    # combines two independent re-entrant chains, so both re-enter within one
+    # outer query (a multi-child plan re-enters per side).
+    expected = {"a": sorted(base_values)}
+    if shape == "chain":
+        top = build_chain("", "x")
+        sql = f"SELECT * FROM {top}"
+        for i in range(depth):
+            expected[f"x{i}"] = sorted(v + i for v in base_values)
+    elif shape == "join":
+        left = build_chain("l", "x")
+        right = build_chain("r", "y")
+        sql = f"SELECT * FROM {left} JOIN {right} USING (a)"
+        for i in range(depth):
+            expected[f"x{i}"] = sorted(v + i for v in base_values)
+            expected[f"y{i}"] = sorted(v + i for v in base_values)
+    else:
+        raise ValueError(f"unknown shape: {shape!r}")
+
+    frame = ctx.sql(sql)
     if drive == "stream":
         batches = [b.to_pyarrow() for b in frame.execute_stream()]
     elif drive == "partitioned":
@@ -134,10 +169,6 @@ def main():
         raise ValueError(f"unknown drive mode: {drive!r}")
     table = pa.Table.from_batches(batches)
 
-    # Tight correctness check: every level adds x{i} = a + i over the base rows.
-    expected = {"a": sorted(base_values)}
-    for i in range(depth):
-        expected[f"x{i}"] = sorted(v + i for v in base_values)
     actual = {c: sorted(table.column(c).to_pylist()) for c in table.column_names}
     assert actual == expected, f"wrong result: {actual} != {expected}"
 

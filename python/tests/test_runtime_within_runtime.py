@@ -577,40 +577,50 @@ def test_reentrant_execute_stream_single_worker_does_not_deadlock():
 _STREAM_CHAIN_TIMEOUT = 10
 
 
-def _expected_stream_chain_checksum(depth, base=(1, 2, 3, 4, 5)):
-    """Sum over every cell of the depth-level chain result (a plus x{i}=a+i)."""
-    total = sum(base)  # column a
-    for i in range(depth):
-        total += sum(v + i for v in base)  # column x{i}
-    return total
+def _expected_stream_chain_checksum(depth, shape, base=(1, 2, 3, 4, 5)):
+    """Sum over every cell of the result: column a, plus one a+i column per level
+    (`x{i}`), plus a second such column per level (`y{i}`) for the join shape."""
+    per_level = sum(sum(v + i for v in base) for i in range(depth))
+    added_columns = 2 if shape == "join" else 1  # join carries x{i} and y{i}
+    return sum(base) + added_columns * per_level
 
 
 # The nested per-level polls run on workers regardless of how the top query is
-# consumed, so all three outer drives deadlock before the fix -- each exercises a
-# distinct outer bridge (execute_stream / execute_stream_partitioned / collect).
-@pytest.mark.parametrize("drive", ["stream", "partitioned", "collect"])
-def test_reentrant_stream_chain_low_cores_does_not_deadlock(drive):
+# consumed or shaped, so each case below deadlocks before the fix. The three
+# drives exercise distinct outer bridges (execute_stream / the partitioned spawn
+# path / collect); the join adds a multi-child plan that re-enters per side.
+@pytest.mark.parametrize(
+    ("drive", "shape"),
+    [
+        ("stream", "chain"),
+        ("partitioned", "chain"),
+        ("collect", "chain"),
+        ("stream", "join"),
+    ],
+)
+def test_reentrant_stream_chain_low_cores_does_not_deadlock(drive, shape):
     """
-    Worker-starvation regression for the re-entrant-provider chain.
+    Worker-starvation regression for the re-entrant-provider chain / join.
 
     Runs in a fresh subprocess (see _reentrant_stream_chain_child) that sizes a
     chain of providers -- each scan() drains a nested execute_stream -- to
-    workers + 2, and drains the top query via `drive`. Because depth exceeds the
-    worker count, a scan that blocks a worker without a core handoff (the pre-fix
-    thread::scope/join in ibis_table_exec) leaves no worker to drive the deepest
-    level and the outer query hangs; the spawn_blocking reader keeps it green.
-    The out-of-process timeout turns a hang into a fast failure, and the child
-    re-checks the exact rows so a silent wrong-result regression also fails.
+    workers + 2, and drains the top query via `drive` in the given `shape`.
+    Because depth exceeds the worker count, a scan that blocks a worker without a
+    core handoff (the pre-fix thread::scope/join in ibis_table_exec) leaves no
+    worker to drive the deepest level and the outer query hangs; the
+    spawn_blocking reader keeps it green. The out-of-process timeout turns a hang
+    into a fast failure, and the child re-checks the exact rows so a silent
+    wrong-result regression also fails.
     """
     try:
         proc = subprocess.run(
-            [sys.executable, _STREAM_CHAIN_CHILD, drive],
+            [sys.executable, _STREAM_CHAIN_CHILD, drive, shape],
             capture_output=True,
             text=True,
             timeout=_STREAM_CHAIN_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        pytest.fail(f"re-entrant chain deadlocked the runtime (drive={drive})")
+        pytest.fail(f"re-entrant chain deadlocked the runtime ({drive}/{shape})")
 
     if "SKIP" in proc.stdout:
         pytest.skip("need >= 2 tokio workers to reproduce the starvation")
@@ -621,7 +631,7 @@ def test_reentrant_stream_chain_low_cores_does_not_deadlock(drive):
     depth, rows, checksum = (int(match.group(i)) for i in (1, 2, 3))
     assert depth >= 3, f"chain too shallow to guard the regression: depth={depth}"
     assert rows == 5, proc.stdout
-    assert checksum == _expected_stream_chain_checksum(depth), proc.stdout
+    assert checksum == _expected_stream_chain_checksum(depth, shape), proc.stdout
 
 
 # ---------------------------------------------------------------------------
