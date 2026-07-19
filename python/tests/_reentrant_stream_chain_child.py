@@ -30,6 +30,15 @@ Beyond "did not hang" it re-materialises the streamed result and checks the
 exact rows -- each level adds ``x{i} = a + i`` -- so a silent wrong-result
 regression in the spawn_blocking reader / channel / projection path also fails.
 
+Drive mode
+----------
+``argv[1]`` selects how the *outer* query is consumed: ``stream`` (default),
+``partitioned`` (``execute_stream_partitioned``), or ``collect``. All three
+deadlock before the fix -- the nested per-level polls run on workers regardless
+of how the top is drained -- so each exercises a distinct outer bridge
+(``execute_stream`` / ``execute_stream_partitioned`` / ``collect``) over the
+same starvation setup.
+
 Output contract
 ---------------
 ``OK depth=<d> rows=<n> checksum=<c>`` on success, or ``SKIP`` when fewer than
@@ -38,6 +47,7 @@ Underscore-prefixed so pytest does not collect it.
 """
 
 import os
+import sys
 
 
 def _worker_count():
@@ -108,8 +118,21 @@ def main():
         ctx.register_table_provider(next_name, provider)
         name = next_name
 
+    drive = sys.argv[1] if len(sys.argv) > 1 else "stream"
     frame = ctx.sql(f"SELECT * FROM {name}")
-    table = pa.Table.from_batches([b.to_pyarrow() for b in frame.execute_stream()])
+    if drive == "stream":
+        batches = [b.to_pyarrow() for b in frame.execute_stream()]
+    elif drive == "partitioned":
+        batches = [
+            b.to_pyarrow()
+            for stream in frame.execute_stream_partitioned()
+            for b in stream
+        ]
+    elif drive == "collect":
+        batches = frame.collect()
+    else:
+        raise ValueError(f"unknown drive mode: {drive!r}")
+    table = pa.Table.from_batches(batches)
 
     # Tight correctness check: every level adds x{i} = a + i over the base rows.
     expected = {"a": sorted(base_values)}

@@ -585,29 +585,32 @@ def _expected_stream_chain_checksum(depth, base=(1, 2, 3, 4, 5)):
     return total
 
 
-def test_reentrant_stream_chain_low_cores_does_not_deadlock():
+# The nested per-level polls run on workers regardless of how the top query is
+# consumed, so all three outer drives deadlock before the fix -- each exercises a
+# distinct outer bridge (execute_stream / execute_stream_partitioned / collect).
+@pytest.mark.parametrize("drive", ["stream", "partitioned", "collect"])
+def test_reentrant_stream_chain_low_cores_does_not_deadlock(drive):
     """
-    Worker-starvation regression for the streaming re-entrant-provider chain.
+    Worker-starvation regression for the re-entrant-provider chain.
 
     Runs in a fresh subprocess (see _reentrant_stream_chain_child) that sizes a
     chain of providers -- each scan() drains a nested execute_stream -- to
-    workers + 2, and drives the top with execute_stream. Because depth exceeds
-    the worker count, a scan that blocks a worker without a core handoff (the
-    pre-fix thread::scope/join in ibis_table_exec) leaves no worker to drive the
-    deepest level and the outer query hangs; the spawn_blocking reader keeps it
-    green. The out-of-process timeout turns a hang into a fast failure, and the
-    child re-checks the exact streamed rows so a silent wrong-result regression
-    also fails.
+    workers + 2, and drains the top query via `drive`. Because depth exceeds the
+    worker count, a scan that blocks a worker without a core handoff (the pre-fix
+    thread::scope/join in ibis_table_exec) leaves no worker to drive the deepest
+    level and the outer query hangs; the spawn_blocking reader keeps it green.
+    The out-of-process timeout turns a hang into a fast failure, and the child
+    re-checks the exact rows so a silent wrong-result regression also fails.
     """
     try:
         proc = subprocess.run(
-            [sys.executable, _STREAM_CHAIN_CHILD],
+            [sys.executable, _STREAM_CHAIN_CHILD, drive],
             capture_output=True,
             text=True,
             timeout=_STREAM_CHAIN_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        pytest.fail("re-entrant execute_stream chain deadlocked the runtime")
+        pytest.fail(f"re-entrant chain deadlocked the runtime (drive={drive})")
 
     if "SKIP" in proc.stdout:
         pytest.skip("need >= 2 tokio workers to reproduce the starvation")
