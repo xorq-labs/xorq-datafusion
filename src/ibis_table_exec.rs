@@ -6,11 +6,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::PyArrowType;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::project_schema;
 use datafusion_common::DataFusionError as InnerDataFusionError;
-use futures::stream;
 use pyo3::types::PyIterator;
 use pyo3::{Bound, Py, PyAny, Python};
 
@@ -18,11 +16,6 @@ use crate::errors::DataFusionError;
 use crate::utils::compute_properties;
 
 use pyo3::prelude::*;
-
-/// Batches buffered in the channel between the blocking reader thread and the
-/// async stream consumer.  Limits memory while allowing the reader to stay one
-/// step ahead of the consumer.
-const CHANNEL_CAPACITY: usize = 8;
 
 #[derive(Debug)]
 pub struct IbisTableExec {
@@ -116,66 +109,35 @@ impl ExecutionPlan for IbisTableExec {
         let columns = self.columns.clone();
         let record_batch_reader = Python::attach(|py| self.record_batch_reader.clone_ref(py));
 
-        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
-
-        // One blocking thread owns the Python reader for the entire stream
-        // lifetime and drains it batch-by-batch. Running the pull on the blocking
-        // pool (never an async worker) is what keeps re-entrant providers safe:
-        // when this reader is a Python `scan()` generator that itself re-enters
-        // `execute_stream`, the nested block_on lands on a blocking thread and the
-        // inner query still finds a free worker, so a chain deeper than the worker
-        // count cannot starve the runtime. The GIL is acquired and released once
-        // per batch, before blocking_send, so other Python threads can run while
-        // the async consumer catches up.
-        tokio::task::spawn_blocking(move || {
-            let iter = match Python::attach(|py| {
-                PyIterator::from_object(record_batch_reader.bind(py)).map(|it| it.unbind())
-            }) {
-                Ok(it) => it,
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(InnerDataFusionError::External(Box::new(e))));
-                    return;
+        // The pull closure runs on the blocking pool (see spawn_channel_stream), so
+        // it may hold the GIL. The Python iterator is built lazily on the first
+        // pull rather than here, so GIL acquisition never lands on an async worker.
+        // A re-entrant reader (a Python `scan()` generator that drains a nested
+        // execute_stream) releases the GIL again internally via wait_for_future's
+        // py.detach, so nested runtime work never holds the GIL here.
+        let mut iter: Option<Py<PyIterator>> = None;
+        let pull: crate::utils::BatchPull = Box::new(move || {
+            Python::attach(|py| {
+                if iter.is_none() {
+                    match PyIterator::from_object(record_batch_reader.bind(py)) {
+                        Ok(it) => iter = Some(it.unbind()),
+                        Err(e) => return Some(Err(InnerDataFusionError::External(Box::new(e)))),
+                    }
                 }
-            };
-
-            loop {
-                // GIL released when the Python::attach closure returns, before
-                // blocking_send. A re-entrant reader releases it again internally
-                // (via wait_for_future's py.detach) while it drains its own nested
-                // stream, so the nested runtime work never holds the GIL here.
-                let next = Python::attach(|py| {
-                    let mut bound_iter = iter.clone_ref(py).into_bound(py);
-                    bound_iter.next().map(|res| {
-                        res.and_then(|batch| {
-                            let batch = match &columns {
-                                Some(cols) => batch.call_method1("select", (cols.clone(),))?,
-                                None => batch,
-                            };
-                            Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0)
-                        })
-                        .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
+                let mut bound_iter = iter.as_ref().unwrap().clone_ref(py).into_bound(py);
+                bound_iter.next().map(|res| {
+                    res.and_then(|batch| {
+                        let batch = match &columns {
+                            Some(cols) => batch.call_method1("select", (cols.clone(),))?,
+                            None => batch,
+                        };
+                        Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0)
                     })
-                });
-
-                match next {
-                    None => break,
-                    Some(Err(e)) => {
-                        let _ = tx.blocking_send(Err(e));
-                        break;
-                    }
-                    Some(Ok(rb)) => {
-                        if tx.blocking_send(Ok(rb)).is_err() {
-                            break; // receiver dropped — query cancelled
-                        }
-                    }
-                }
-            }
+                    .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
+                })
+            })
         });
 
-        let stream = stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        });
-
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        Ok(crate::utils::spawn_channel_stream(schema, pull))
     }
 }

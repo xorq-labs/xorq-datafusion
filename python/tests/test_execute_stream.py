@@ -4,6 +4,10 @@ Core property: execute_stream and collect produce the same concatenated data
 for all supported Arrow return types, including binary variants.
 """
 
+import subprocess
+import sys
+import textwrap
+
 import pyarrow as pa
 from hypothesis import HealthCheck, given, settings
 
@@ -115,3 +119,49 @@ def test_udaf_aggregate_returns_one_row(ctx_df_type):
     _ctx, df, _rt = ctx_df_type
     via_stream = stream_all(df)
     assert via_stream.num_rows == 1
+
+
+# A provider-backed stream (register_record_batch_reader) is driven by a
+# spawn_blocking producer feeding a bounded channel. If that producer parked in
+# blocking_send for the stream's whole lifetime, each partially-consumed-but-alive
+# stream would pin one tokio blocking-pool thread; holding more than the pool cap
+# (512) would exhaust it and hang the next query. The reserve()/per-batch design
+# must instead park the coordinator as a cheap async task holding no thread.
+_ABANDONED_STREAMS_SCRIPT = textwrap.dedent("""\
+    import pyarrow as pa
+    import xorq_datafusion as xdf
+
+    schema = pa.schema([("x", pa.int64())])
+    # 20 source batches (> channel capacity 8) so a lifetime producer would block.
+    batches = [
+        pa.record_batch(
+            {"x": pa.array(range(i * 2000, (i + 1) * 2000), type=pa.int64())},
+            schema=schema,
+        )
+        for i in range(20)
+    ]
+    tbl = pa.Table.from_batches(batches)   # re-scannable: __arrow_c_stream__ per scan
+    ctx = xdf.SessionContext()
+    ctx.register_record_batch_reader("t", tbl)
+
+    # Hold far more partially-consumed streams than the blocking-pool cap (512).
+    held = []
+    for _ in range(600):
+        s = ctx.sql("SELECT * FROM t").execute_stream()
+        next(iter(s))            # start the producer + consume one batch, then abandon
+        held.append(s)
+    print("OK", len(held))
+""")
+
+
+def test_abandoned_streams_do_not_exhaust_blocking_pool():
+    """Holding >512 partially-consumed provider-backed execute_stream results must
+    not exhaust the tokio blocking pool. TimeoutExpired => the exhaustion hang."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _ABANDONED_STREAMS_SCRIPT],
+        timeout=30,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.stdout.strip() == "OK 600", proc.stdout

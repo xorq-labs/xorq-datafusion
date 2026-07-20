@@ -12,20 +12,13 @@ use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::Result;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::LexOrdering;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     project_schema, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     SendableRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
 use datafusion_expr::Expr;
-use futures::stream;
 use pyo3::prelude::*;
-
-/// Batches buffered in the channel between the blocking reader thread and the
-/// async stream consumer.  Limits memory while allowing the reader to stay
-/// one step ahead of the consumer.
-const CHANNEL_CAPACITY: usize = 8;
 
 /// A [`TableProvider`] backed by a Python object that supports the Arrow C stream
 /// interface (`__arrow_c_stream__`).
@@ -172,62 +165,39 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
         let projected_schema = self.projected_schema.clone();
         let py_object = self.record_batch_provider.py_object.clone();
 
-        let (tx, rx) = tokio::sync::mpsc::channel(CHANNEL_CAPACITY);
-
-        // One blocking thread owns the reader for the entire stream lifetime.
-        // GIL is acquired and released once per batch; it is always released
-        // before blocking_send so other Python threads can run while the async
-        // consumer catches up.  This eliminates the per-batch spawn_blocking
-        // overhead of the previous design.
-        tokio::task::spawn_blocking(move || {
-            let mut reader = match Python::attach(|py| {
-                py_object
-                    .bind(py)
-                    .extract::<PyArrowType<ArrowArrayStreamReader>>()
-                    .map(|t| t.0)
-                    .map_err(|e| DataFusionError::External(Box::new(e)))
-            }) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
-                    return;
+        // The pull runs on the blocking pool (see spawn_channel_stream). The reader
+        // is acquired lazily on the first pull, and each batch is produced there,
+        // so an idle/abandoned stream pins no blocking thread.
+        let mut reader: Option<ArrowArrayStreamReader> = None;
+        let pull: crate::utils::BatchPull = Box::new(move || {
+            if reader.is_none() {
+                // Acquire the Arrow C stream reader once, on the blocking pool.
+                match Python::attach(|py| {
+                    py_object
+                        .bind(py)
+                        .extract::<PyArrowType<ArrowArrayStreamReader>>()
+                        .map(|t| t.0)
+                        .map_err(|e| DataFusionError::External(Box::new(e)))
+                }) {
+                    Ok(r) => reader = Some(r),
+                    Err(e) => return Some(Err(e)),
                 }
-            };
+            }
 
-            loop {
-                // Do NOT hold the GIL across reader.next(): the Arrow C stream
-                // get_next callback acquires the GIL itself when it needs to call
-                // back into Python.  Holding GIL here while the callback tries to
-                // acquire a Rust mutex (held by another reader thread) creates a
-                // GIL+mutex inversion deadlock when two scans share the same
-                // upstream cache (e.g. batchcorder StreamCache).
-                let next = reader.next();
-                match next {
-                    None => break,
-                    Some(Err(e)) => {
-                        let _ = tx.blocking_send(Err(DataFusionError::from(e)));
-                        break;
-                    }
-                    Some(Ok(rb)) => {
-                        let item = match &projections {
-                            Some(pj) => rb.project(pj.as_slice()).map_err(DataFusionError::from),
-                            None => Ok(rb),
-                        };
-                        if tx.blocking_send(item).is_err() {
-                            break; // receiver dropped — query cancelled
-                        }
-                    }
-                }
+            // Do NOT hold the GIL across next(): the Arrow C get_next callback
+            // acquires the GIL itself; holding it here while another reader thread
+            // owns the shared-cache Rust mutex is the GIL+mutex inversion (two
+            // scans sharing one upstream cache, e.g. batchcorder StreamCache).
+            match reader.as_mut().unwrap().next() {
+                None => None,
+                Some(Err(e)) => Some(Err(DataFusionError::from(e))),
+                Some(Ok(rb)) => Some(match &projections {
+                    Some(pj) => rb.project(pj.as_slice()).map_err(DataFusionError::from),
+                    None => Ok(rb),
+                }),
             }
         });
 
-        let stream = stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        });
-
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            projected_schema,
-            stream,
-        )))
+        Ok(crate::utils::spawn_channel_stream(projected_schema, pull))
     }
 }
