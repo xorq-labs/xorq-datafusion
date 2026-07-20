@@ -69,7 +69,14 @@ pub fn spawn_channel_stream(schema: SchemaRef, pull: BatchPull) -> SendableRecor
                 Ok((item, returned)) => {
                     pull = returned;
                     match item {
-                        Some(batch) => permit.send(batch),
+                        Some(Ok(batch)) => permit.send(Ok(batch)),
+                        // An errored stream is terminal: surface the error once and
+                        // stop, rather than re-running the pull (which would retry a
+                        // failed lazy init or read past a fatal error).
+                        Some(Err(e)) => {
+                            permit.send(Err(e));
+                            break;
+                        }
                         None => break,
                     }
                 }
