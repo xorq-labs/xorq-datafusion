@@ -198,6 +198,12 @@ impl ExecutionPlan for PyRecordBatchProviderExec {
             }
         });
 
-        Ok(crate::utils::spawn_channel_stream(projected_schema, pull))
+        // Read-ahead here matches what this path always did; the speculation budget
+        // caps what a reader that blocks on a batch nobody asked for can cost.
+        Ok(crate::utils::spawn_channel_stream(
+            projected_schema,
+            pull,
+            crate::utils::ReadAhead::Buffered,
+        ))
     }
 }

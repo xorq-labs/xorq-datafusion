@@ -7,10 +7,13 @@ for all supported Arrow return types, including binary variants.
 import subprocess
 import sys
 import textwrap
+import time
 
 import pyarrow as pa
+import pytest
 from hypothesis import HealthCheck, given, settings
 
+import xorq_datafusion as xdf
 from tests.strategies import udaf_dataframe, udf_dataframe
 
 
@@ -165,3 +168,105 @@ def test_abandoned_streams_do_not_exhaust_blocking_pool():
     )
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert proc.stdout.strip() == "OK 600", proc.stdout
+
+
+# A pull is a blocking call into Python that cannot be interrupted, so a batch
+# the query never asked for can strand a blocking-pool thread forever. Pulling
+# only on demand (the AbstractTableProvider path) keeps that from happening at
+# all; the register_record_batch_reader path keeps its read-ahead but draws on a
+# bounded speculation budget, so the leak stops instead of exhausting the pool.
+_BLOCKED_READ_AHEAD_SCRIPT = textwrap.dedent("""\
+    import sys
+    import threading
+
+    import pyarrow as pa
+    import xorq_datafusion as xdf
+
+    mode = sys.argv[1]
+    schema = pa.schema([("a", pa.int64())])
+    forever = threading.Event()          # never set
+
+    def reader():
+        def gen():
+            yield pa.record_batch({"a": pa.array([1], type=pa.int64())}, schema=schema)
+            forever.wait()               # a batch beyond the LIMIT: must not be pulled
+        return pa.RecordBatchReader.from_batches(schema, gen())
+
+    class Provider:
+        def schema(self):
+            return schema
+
+        def scan(self, filters=None):
+            return reader()
+
+    ctx = xdf.SessionContext()
+    # Well past the 512-thread blocking-pool cap: one leak per query would hang.
+    for i in range(600):
+        ctx.deregister_table("t")
+        if mode == "provider":
+            ctx.register_table_provider("t", Provider())
+        else:
+            ctx.register_record_batch_reader("t", reader())
+        rows = ctx.sql("SELECT * FROM t LIMIT 1").collect()
+        assert sum(b.num_rows for b in rows) == 1, i
+    print("OK")
+""")
+
+
+@pytest.mark.parametrize("mode", ["provider", "reader"])
+def test_blocked_read_ahead_does_not_exhaust_blocking_pool(mode):
+    """A reader that blocks on the batch after the one a LIMIT needs must not cost
+    a blocking-pool thread per query. TimeoutExpired => the exhaustion hang."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _BLOCKED_READ_AHEAD_SCRIPT, mode],
+        timeout=60,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.stdout.strip() == "OK", proc.stdout
+
+
+def _counting_provider(pulls):
+    """AbstractTableProvider whose reader records every batch it produces."""
+
+    schema = pa.schema([("a", pa.int64())])
+
+    class CountingProvider:
+        def schema(self):
+            return schema
+
+        def scan(self, filters=None):
+            def gen():
+                for i in range(1000):
+                    pulls.append(i)
+                    yield pa.record_batch(
+                        {"a": pa.array([i], type=pa.int64())}, schema=schema
+                    )
+
+            return pa.RecordBatchReader.from_batches(schema, gen())
+
+    return CountingProvider()
+
+
+def test_provider_scan_pulls_only_what_is_consumed():
+    """The AbstractTableProvider path is demand-driven: no batch is read that the
+    query did not poll for, so a reader with side effects (a paginated source) is
+    not asked for pages the query discards."""
+    ctx = xdf.SessionContext()
+
+    limited = []
+    ctx.register_table_provider("limited", _counting_provider(limited))
+    rows = ctx.sql("SELECT * FROM limited LIMIT 1").collect()
+    assert sum(b.num_rows for b in rows) == 1
+    assert len(limited) == 1, f"LIMIT 1 pulled {len(limited)} batches"
+
+    abandoned = []
+    ctx.register_table_provider("abandoned", _counting_provider(abandoned))
+    stream = ctx.sql("SELECT * FROM abandoned").execute_stream()
+    batch = next(iter(stream))
+    assert batch.to_pyarrow().num_rows == 1
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        assert len(abandoned) == 1, f"read ahead {len(abandoned)} batches while idle"
+        time.sleep(0.05)

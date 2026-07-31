@@ -199,7 +199,13 @@ impl ExecutionPlan for DatasetExec {
             })
         });
 
-        Ok(crate::utils::spawn_channel_stream(schema, pull))
+        // pyarrow's own scanner: the pull always terminates, so overlapping it with
+        // the consumer is safe and keeps the pre-existing read-ahead.
+        Ok(crate::utils::spawn_channel_stream(
+            schema,
+            pull,
+            crate::utils::ReadAhead::Buffered,
+        ))
     }
 }
 

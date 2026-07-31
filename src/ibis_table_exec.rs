@@ -168,6 +168,12 @@ impl ExecutionPlan for IbisTableExec {
             })
         });
 
-        Ok(crate::utils::spawn_channel_stream(schema, pull))
+        // Arbitrary user Python: pull only what the query polls for, so a reader
+        // that blocks on a batch beyond a LIMIT never strands a pool thread.
+        Ok(crate::utils::spawn_channel_stream(
+            schema,
+            pull,
+            crate::utils::ReadAhead::OnDemand,
+        ))
     }
 }
