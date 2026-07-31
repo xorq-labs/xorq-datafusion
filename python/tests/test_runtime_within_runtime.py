@@ -39,6 +39,7 @@ panic above. `wait_for_completion` was given the same `Handle::try_current()` +
 import collections
 import concurrent.futures
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -537,6 +538,10 @@ _STARVATION_CHILD = os.path.join(
     os.path.dirname(__file__), "_reentrant_starvation_child.py"
 )
 
+_STREAM_CHAIN_CHILD = os.path.join(
+    os.path.dirname(__file__), "_reentrant_stream_chain_child.py"
+)
+
 
 @pytest.mark.skipif(
     not hasattr(os, "sched_setaffinity"),
@@ -565,6 +570,68 @@ def test_reentrant_execute_stream_single_worker_does_not_deadlock():
         pytest.skip("could not restrict CPU affinity in the child process")
     assert proc.returncode == 0, f"child failed: {proc.stderr}"
     assert "OK 4" in proc.stdout, proc.stdout
+
+
+# Fail fast: the child's success path is well under a second, so a chain that
+# takes this long has deadlocked. Kept short so the regression fails quickly.
+_STREAM_CHAIN_TIMEOUT = 10
+
+
+def _expected_stream_chain_columns(depth, shape):
+    """Column a, plus one added column per level (`x{i}`), plus a second one per
+    level (`y{i}`) for the join shape. The *values* are asserted by the child."""
+    added_columns = 2 if shape == "join" else 1  # join carries x{i} and y{i}
+    return 1 + added_columns * depth
+
+
+# The nested per-level polls run on workers regardless of how the top query is
+# consumed or shaped, so each case below deadlocks before the fix. The three
+# drives exercise distinct outer bridges (execute_stream / the partitioned spawn
+# path / collect); the join adds a multi-child plan that re-enters per side.
+@pytest.mark.parametrize(
+    ("drive", "shape"),
+    [
+        ("stream", "chain"),
+        ("partitioned", "chain"),
+        ("collect", "chain"),
+        ("stream", "join"),
+    ],
+)
+def test_reentrant_stream_chain_low_cores_does_not_deadlock(drive, shape):
+    """
+    Worker-starvation regression for the re-entrant-provider chain / join.
+
+    Runs in a fresh subprocess (see _reentrant_stream_chain_child) that sizes a
+    chain of providers -- each scan() drains a nested execute_stream -- to
+    workers + 2, and drains the top query via `drive` in the given `shape`.
+    Because depth exceeds the worker count, a scan that blocks a worker without a
+    core handoff (the pre-fix thread::scope/join in ibis_table_exec) leaves no
+    worker to drive the deepest level and the outer query hangs; the
+    spawn_blocking reader keeps it green. The out-of-process timeout turns a hang
+    into a fast failure, and the child re-checks the exact rows so a silent
+    wrong-result regression also fails.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, _STREAM_CHAIN_CHILD, drive, shape],
+            capture_output=True,
+            text=True,
+            timeout=_STREAM_CHAIN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"re-entrant chain deadlocked the runtime ({drive}/{shape})")
+
+    if "SKIP" in proc.stdout:
+        pytest.skip("need >= 2 tokio workers to reproduce the starvation")
+    assert proc.returncode == 0, f"child failed: {proc.stderr}"
+
+    match = re.search(r"OK depth=(\d+) rows=(\d+) cols=(\d+)", proc.stdout)
+    assert match, f"unexpected child output: {proc.stdout!r} / {proc.stderr}"
+    depth, rows, cols = (int(match.group(i)) for i in (1, 2, 3))
+    assert depth >= 3, f"chain too shallow to guard the regression: depth={depth}"
+    assert rows == 5, proc.stdout
+    # The child asserts the exact cell values; here we only pin the plan shape.
+    assert cols == _expected_stream_chain_columns(depth, shape), proc.stdout
 
 
 # ---------------------------------------------------------------------------

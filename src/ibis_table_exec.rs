@@ -1,75 +1,27 @@
 use std::any::Any;
 use std::fmt::Formatter;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::thread;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
-use arrow::error::ArrowError;
 use arrow::pyarrow::PyArrowType;
-use datafusion::arrow::error::Result as ArrowResult;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::project_schema;
-use futures::{Stream, TryStreamExt};
-use pyo3::types::PyIterator;
-use pyo3::{Bound, PyAny, Python};
+use datafusion_common::DataFusionError as InnerDataFusionError;
+use pyo3::types::{PyIterator, PyList};
+use pyo3::{Bound, Py, PyAny, Python};
 
 use crate::errors::DataFusionError;
 use crate::utils::compute_properties;
 
 use pyo3::prelude::*;
 
-struct RecordBatchReaderAdapter {
-    record_batch_reader: Py<PyAny>,
-    columns: Option<Vec<String>>,
-}
-
-impl Stream for RecordBatchReaderAdapter {
-    type Item = ArrowResult<RecordBatch>;
-
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        thread::scope(|s| {
-            let res = s
-                .spawn(move || {
-                    let option = Python::attach(|py| {
-                        let batches = self.record_batch_reader.bind(py);
-                        let mut batches = PyIterator::from_object(batches).unwrap();
-                        Some(
-                            batches
-                                .next()?
-                                .and_then(|batch| {
-                                    let record_batch = batch
-                                        .call_method1("select", (self.columns.clone().unwrap(),));
-                                    let record_batch: RecordBatch =
-                                        record_batch?.extract::<PyArrowType<_>>()?.0;
-                                    Ok(record_batch)
-                                })
-                                .map_err(|err| ArrowError::ExternalError(Box::new(err))),
-                        )
-                    });
-
-                    match option {
-                        Some(Ok(value)) => Poll::Ready(Some(Ok(value))),
-                        _ => Poll::Ready(None),
-                    }
-                })
-                .join();
-
-            match res {
-                Ok(val) => val,
-                _ => Poll::Ready(None),
-            }
-        })
-    }
-}
-
 #[derive(Debug)]
 pub struct IbisTableExec {
-    record_batch_reader: Py<PyAny>,
+    /// `Arc` so `execute()` can hand a reference to the pull closure without
+    /// touching the GIL (see the comment there).
+    record_batch_reader: Arc<Py<PyAny>>,
     schema: SchemaRef,
     columns: Option<Vec<String>>,
     cache: Arc<PlanProperties>,
@@ -107,11 +59,33 @@ impl IbisTableExec {
         let cache = compute_properties(schema.clone());
 
         Ok(IbisTableExec {
-            record_batch_reader: record_batch_reader.clone().unbind(),
+            record_batch_reader: Arc::new(record_batch_reader.clone().unbind()),
             schema,
             columns,
             cache,
         })
+    }
+}
+
+/// Per-stream Python state, built on the first pull (on the blocking pool) and
+/// reused for every batch of that stream.
+struct PullState {
+    iter: Py<PyIterator>,
+    /// The projection as a Python list, converted once instead of per batch.
+    projection: Option<Py<PyList>>,
+}
+
+impl PullState {
+    fn new(
+        py: Python,
+        record_batch_reader: &Py<PyAny>,
+        columns: Option<&[String]>,
+    ) -> PyResult<Self> {
+        let iter = PyIterator::from_object(record_batch_reader.bind(py))?.unbind();
+        let projection = columns
+            .map(|cols| PyList::new(py, cols).map(|list| list.unbind()))
+            .transpose()?;
+        Ok(Self { iter, projection })
     }
 }
 
@@ -155,18 +129,51 @@ impl ExecutionPlan for IbisTableExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> datafusion_common::Result<SendableRecordBatchStream> {
-        Python::attach(|py| {
-            let record_batches = RecordBatchReaderAdapter {
-                record_batch_reader: self.record_batch_reader.clone_ref(py),
-                columns: self.columns.clone(),
-            };
+        let schema = self.schema.clone();
+        let columns = self.columns.clone();
+        // Arc clone -- no GIL: execute() runs on whatever thread the parent plan
+        // polls from, which is frequently an async worker.
+        let record_batch_reader = Arc::clone(&self.record_batch_reader);
 
-            let record_batch_stream: SendableRecordBatchStream =
-                Box::pin(RecordBatchStreamAdapter::new(
-                    self.schema.clone(),
-                    record_batches.map_err(|e| e.into()),
-                ));
-            Ok(record_batch_stream)
-        })
+        // The pull closure runs on the blocking pool (see spawn_channel_stream), so
+        // it may hold the GIL. The Python iterator and the projection list are both
+        // built lazily on the first pull rather than here, so GIL acquisition never
+        // lands on an async worker. A re-entrant reader (a Python `scan()`
+        // generator that drains a nested execute_stream) releases the GIL again
+        // internally via wait_for_future's py.detach, so nested runtime work never
+        // holds the GIL here.
+        let mut state: Option<PullState> = None;
+        let pull: crate::utils::BatchPull = Box::new(move || {
+            Python::attach(|py| {
+                if state.is_none() {
+                    // Iterator and projection list are built once per stream, not
+                    // rebuilt for every batch.
+                    match PullState::new(py, &record_batch_reader, columns.as_deref()) {
+                        Ok(built) => state = Some(built),
+                        Err(e) => return Some(Err(InnerDataFusionError::External(Box::new(e)))),
+                    }
+                }
+                let state = state.as_ref().expect("initialized above");
+                let mut bound_iter = state.iter.clone_ref(py).into_bound(py);
+                bound_iter.next().map(|res| {
+                    res.and_then(|batch| {
+                        let batch = match &state.projection {
+                            Some(cols) => batch.call_method1("select", (cols.bind(py),))?,
+                            None => batch,
+                        };
+                        Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0)
+                    })
+                    .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
+                })
+            })
+        });
+
+        // Arbitrary user Python: pull only what the query polls for, so a reader
+        // that blocks on a batch beyond a LIMIT never strands a pool thread.
+        Ok(crate::utils::spawn_channel_stream(
+            schema,
+            pull,
+            crate::utils::ReadAhead::OnDemand,
+        ))
     }
 }

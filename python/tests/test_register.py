@@ -1,6 +1,8 @@
 from abc import ABCMeta, abstractmethod
 
 import ibis
+import pyarrow as pa
+import pytest
 
 
 class AbstractTableProvider(metaclass=ABCMeta):
@@ -36,6 +38,45 @@ def test_register_table_provider(ctx, data_dir):
 
     assert ctx.table_exist("data")
     assert not actual.empty
+
+
+_FAILING_SCHEMA = pa.schema([("a", pa.int64())])
+
+
+class FailingReaderProvider(AbstractTableProvider):
+    """scan() returns a reader that yields one batch and then raises."""
+
+    def schema(self):
+        return _FAILING_SCHEMA
+
+    def scan(self, filters=None):
+        def gen():
+            yield pa.record_batch({"a": pa.array([1, 2], pa.int64())})
+            raise RuntimeError("reader blew up")
+
+        return pa.RecordBatchReader.from_batches(_FAILING_SCHEMA, gen())
+
+
+@pytest.mark.parametrize("sql", ["select * from boom", "select a from boom"])
+@pytest.mark.parametrize(
+    "drive",
+    [
+        lambda frame: frame.collect(),
+        lambda frame: list(frame.execute_stream()),
+    ],
+    ids=["collect", "stream"],
+)
+def test_register_table_provider_reader_error_is_not_swallowed(ctx, sql, drive):
+    """A Python reader that raises mid-stream must fail the query.
+
+    The reader error used to be swallowed as an end-of-stream, so the query
+    silently returned only the batches read before the failure. Both the
+    projected and unprojected plans must surface it instead of truncating.
+    """
+    ctx.register_table_provider("boom", FailingReaderProvider())
+
+    with pytest.raises(Exception, match="reader blew up"):
+        drive(ctx.sql(sql))
 
 
 def test_register_csv_multiple_paths(ctx, data_dir):

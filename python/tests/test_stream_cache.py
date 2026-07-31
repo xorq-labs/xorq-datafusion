@@ -218,6 +218,126 @@ _CONCURRENT_SCRIPT = textwrap.dedent("""\
 """)
 
 
+# Path B: register_table_provider -> PyTableProvider::scan -> IbisTableExec, which
+# (unlike the Arrow-C-stream PyRecordBatchProvider) holds the GIL across the Python
+# reader's next(). N threads share ONE StreamCache, so concurrent scans contend on
+# the cache's internal mutex while a scanner holds the GIL -- the GIL<->mutex
+# inversion shape. Pinned to two workers to keep the contention tight. A hang =
+# the subprocess timeout fires; a wrong count = a replay/concurrency correctness
+# regression.
+_CONCURRENT_PROVIDER_SCRIPT = textwrap.dedent("""\
+    import os
+    try:
+        _a = sorted(os.sched_getaffinity(0))
+        if len(_a) >= 2:
+            os.sched_setaffinity(0, set(_a[:2]))
+    except (AttributeError, OSError):
+        pass
+
+    import concurrent.futures
+    import threading
+    import pyarrow as pa
+    import xorq_datafusion as xdf
+    from batchcorder import StreamCache
+
+    N = 4
+    schema = pa.schema([("x", pa.int64())])
+    ids = list(range(1000))
+    shared = StreamCache(
+        pa.RecordBatchReader.from_batches(
+            schema,
+            [
+                pa.record_batch({"x": ids[s:s + 64]}, schema=schema)
+                for s in range(0, len(ids), 64)
+            ],
+        )
+    )
+
+    class Provider:
+        def __init__(self, cache):
+            self.cache = cache
+
+        def schema(self):
+            return schema
+
+        def scan(self, filters=None):
+            return pa.RecordBatchReader.from_stream(self.cache.cast(schema))
+
+    barrier = threading.Barrier(N)
+
+    def worker(_idx):
+        ctx = xdf.SessionContext()
+        ctx.register_table_provider("t", Provider(shared))
+        barrier.wait(timeout=8)
+        return ctx.sql("SELECT count(x) AS c, sum(x) AS s FROM t").collect()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=N) as executor:
+        futs = [executor.submit(worker, i) for i in range(N)]
+        results = [f.result() for f in concurrent.futures.as_completed(futs)]
+
+    for batches in results:
+        rb = batches[0]
+        assert rb.column("c")[0].as_py() == len(ids), rb.column("c")[0].as_py()
+        assert rb.column("s")[0].as_py() == sum(ids), rb.column("s")[0].as_py()
+    print("OK")
+""")
+
+
+# Path B: drop a stream mid-ingest, then LIMIT, then a full re-scan. The wrapped
+# StreamCache must still replay every row -- a partial first consumption must not
+# corrupt the cache -- and the dropped stream's spawn_blocking producer must exit
+# (no hang) when its receiver goes away.
+_PROVIDER_CANCEL_REPLAY_SCRIPT = textwrap.dedent("""\
+    import os
+    try:
+        _a = sorted(os.sched_getaffinity(0))
+        if len(_a) >= 2:
+            os.sched_setaffinity(0, set(_a[:2]))
+    except (AttributeError, OSError):
+        pass
+
+    import pyarrow as pa
+    import xorq_datafusion as xdf
+    from batchcorder import StreamCache
+
+    schema = pa.schema([("x", pa.int64())])
+    ids = list(range(1000))
+    cache = StreamCache(
+        pa.RecordBatchReader.from_batches(
+            schema,
+            [
+                pa.record_batch({"x": ids[s:s + 64]}, schema=schema)
+                for s in range(0, len(ids), 64)
+            ],
+        )
+    )
+
+    class Provider:
+        def __init__(self, cache):
+            self.cache = cache
+
+        def schema(self):
+            return schema
+
+        def scan(self, filters=None):
+            return pa.RecordBatchReader.from_stream(self.cache.cast(schema))
+
+    ctx = xdf.SessionContext()
+    ctx.register_table_provider("t", Provider(cache))
+
+    # 1) consume one batch then drop the stream mid-ingest
+    stream = ctx.sql("SELECT * FROM t").execute_stream()
+    next(iter(stream))
+    del stream
+    # 2) engine-driven early stop
+    ctx.sql("SELECT * FROM t LIMIT 3").collect()
+    # 3) a full re-scan must still see every row
+    rb = ctx.sql("SELECT count(x) AS c FROM t").collect()[0]
+    assert rb.column("c")[0].as_py() == len(ids), rb.column("c")[0].as_py()
+    print("OK")
+""")
+
+
 def _run_script(script: str, timeout: int = TIMEOUT_SECONDS) -> None:
     """Run script in subprocess; fail with clear message on non-zero exit or timeout."""
     proc = subprocess.run(
@@ -260,6 +380,23 @@ def test_concurrent_two_scan_no_deadlock_subprocess():
     """N concurrent two-scan queries in fresh process; TimeoutExpired means deadlock."""
     pytest.importorskip("batchcorder")
     _run_script(_CONCURRENT_SCRIPT, timeout=TIMEOUT_SECONDS * 2)
+
+
+def test_concurrent_provider_scan_no_deadlock_subprocess():
+    """N threads share one StreamCache scanned via register_table_provider
+    (IbisTableExec, which holds the GIL across the reader's next()); pinned to two
+    workers. TimeoutExpired means a GIL<->mutex inversion deadlock; a wrong count
+    means a shared-cache replay/concurrency regression."""
+    pytest.importorskip("batchcorder")
+    _run_script(_CONCURRENT_PROVIDER_SCRIPT, timeout=TIMEOUT_SECONDS * 2)
+
+
+def test_provider_cancel_then_replay_subprocess():
+    """A provider-backed StreamCache scan dropped mid-ingest (and a LIMIT) must not
+    corrupt the cache: a subsequent full re-scan still replays every row, and the
+    dropped stream's producer exits (no hang)."""
+    pytest.importorskip("batchcorder")
+    _run_script(_PROVIDER_CANCEL_REPLAY_SCRIPT)
 
 
 def test_two_scan_correct_results():
@@ -684,7 +821,11 @@ def test_prop_three_scan_cte_correct_results(values_and_batch_size):
 
 @_stream_cache_examples
 @given(_table_data())
-@settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow])
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 def test_prop_concurrent_two_scan_correct_results(values_and_batch_size):
     """N concurrent two-scan queries each return correct sum and count."""
     values, batch_size = values_and_batch_size
@@ -736,7 +877,11 @@ def test_prop_concurrent_two_scan_correct_results(values_and_batch_size):
 
 @_stream_cache_examples
 @given(_table_data())
-@settings(max_examples=10, suppress_health_check=[HealthCheck.too_slow])
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 def test_prop_concurrent_shared_cache_correct_results(values_and_batch_size):
     """N workers sharing one StreamCache instance each return correct results.
 
