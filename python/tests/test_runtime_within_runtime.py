@@ -577,12 +577,11 @@ def test_reentrant_execute_stream_single_worker_does_not_deadlock():
 _STREAM_CHAIN_TIMEOUT = 10
 
 
-def _expected_stream_chain_checksum(depth, shape, base=(1, 2, 3, 4, 5)):
-    """Sum over every cell of the result: column a, plus one a+i column per level
-    (`x{i}`), plus a second such column per level (`y{i}`) for the join shape."""
-    per_level = sum(sum(v + i for v in base) for i in range(depth))
+def _expected_stream_chain_columns(depth, shape):
+    """Column a, plus one added column per level (`x{i}`), plus a second one per
+    level (`y{i}`) for the join shape. The *values* are asserted by the child."""
     added_columns = 2 if shape == "join" else 1  # join carries x{i} and y{i}
-    return sum(base) + added_columns * per_level
+    return 1 + added_columns * depth
 
 
 # The nested per-level polls run on workers regardless of how the top query is
@@ -626,12 +625,13 @@ def test_reentrant_stream_chain_low_cores_does_not_deadlock(drive, shape):
         pytest.skip("need >= 2 tokio workers to reproduce the starvation")
     assert proc.returncode == 0, f"child failed: {proc.stderr}"
 
-    match = re.search(r"OK depth=(\d+) rows=(\d+) checksum=(\d+)", proc.stdout)
+    match = re.search(r"OK depth=(\d+) rows=(\d+) cols=(\d+)", proc.stdout)
     assert match, f"unexpected child output: {proc.stdout!r} / {proc.stderr}"
-    depth, rows, checksum = (int(match.group(i)) for i in (1, 2, 3))
+    depth, rows, cols = (int(match.group(i)) for i in (1, 2, 3))
     assert depth >= 3, f"chain too shallow to guard the regression: depth={depth}"
     assert rows == 5, proc.stdout
-    assert checksum == _expected_stream_chain_checksum(depth, shape), proc.stdout
+    # The child asserts the exact cell values; here we only pin the plan shape.
+    assert cols == _expected_stream_chain_columns(depth, shape), proc.stdout
 
 
 # ---------------------------------------------------------------------------

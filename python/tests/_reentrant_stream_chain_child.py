@@ -26,9 +26,10 @@ pinned to two workers first so ``depth`` stays a small, fast ``4``; elsewhere it
 falls back to the box's own core count so the test still runs (no hard
 dependency on ``sched_setaffinity``).
 
-Beyond "did not hang" it re-materialises the streamed result and checks the
-exact rows -- each level adds ``x{i} = a + i`` -- so a silent wrong-result
+Beyond "did not hang" it re-materialises the streamed result and asserts the
+exact rows here -- each level adds ``x{i} = a + i`` -- so a silent wrong-result
 regression in the spawn_blocking reader / channel / projection path also fails.
+The expectation lives only in this file; the parent checks the reported shape.
 
 Drive mode / shape
 ------------------
@@ -45,7 +46,7 @@ re-enters once per side within a single outer query).
 
 Output contract
 ---------------
-``OK depth=<d> rows=<n> checksum=<c>`` on success, or ``SKIP`` when fewer than
+``OK depth=<d> rows=<n> cols=<c>`` on success, or ``SKIP`` when fewer than
 two workers can be secured (the starvation precondition needs ``workers >= 2``).
 Underscore-prefixed so pytest does not collect it.
 """
@@ -172,8 +173,7 @@ def main():
     actual = {c: sorted(table.column(c).to_pylist()) for c in table.column_names}
     assert actual == expected, f"wrong result: {actual} != {expected}"
 
-    checksum = sum(sum(vals) for vals in actual.values())
-    print(f"OK depth={depth} rows={table.num_rows} checksum={checksum}")
+    print(f"OK depth={depth} rows={table.num_rows} cols={table.num_columns}")
     return 0
 
 
