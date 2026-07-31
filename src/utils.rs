@@ -85,11 +85,11 @@ fn try_speculate(read_ahead: ReadAhead) -> Option<Credit> {
 /// on the blocking pool, so it may hold the GIL and block freely.
 ///
 /// Contract for implementers:
-/// * The closure is called from `spawn_blocking`, and **not necessarily from the
-///   same thread each time** -- consecutive batches of one stream may run on
-///   different blocking-pool threads (the GIL still serialises them). A reader
-///   backed by thread-affine state (e.g. a `sqlite3` connection created with
-///   `check_same_thread=True`) must therefore not be used directly as a pull.
+/// * It runs on a thread that may hold the GIL and block, never on an async
+///   worker. A stream normally gets one dedicated thread for its whole life (see
+///   [`AFFINE_THREAD_BUDGET`]), so a reader bound to the thread that created it
+///   keeps working; past that budget consecutive batches may run on different
+///   blocking-pool threads, so thread affinity is best-effort, not guaranteed.
 /// * It is only called again after returning `Some(Ok(_))`: `None` and
 ///   `Some(Err(_))` are both terminal.
 /// * Under [`ReadAhead::Buffered`] it may be called for batches the query never
@@ -97,6 +97,26 @@ fn try_speculate(read_ahead: ReadAhead) -> Option<Credit> {
 /// * It is dropped on the blocking pool too (see [`PullGuard`]), so destroying
 ///   the Python objects it owns may take the GIL.
 pub type BatchPull = Box<dyn FnMut() -> Option<Result<RecordBatch>> + Send>;
+
+/// Streams that may hold a dedicated pull thread at once, process-wide.
+///
+/// A dedicated thread keeps a reader on the thread that created it, which readers
+/// bound to thread-local state (a `sqlite3` cursor, `threading.local()`) require.
+/// The thread parks in `recv()` between batches, so dropping the stream wakes it
+/// and it exits -- unlike a producer parked in `blocking_send`, it cannot be
+/// stranded by an abandoned stream. It is still an OS thread per *live* stream
+/// (~115 kB resident each), hence the cap: past it, streams fall back to the
+/// blocking pool and lose affinity rather than the process losing its thread
+/// budget. The cap sits well above any plausible scan concurrency
+/// (`target_partitions` per query), and the readers that hit it in bulk --
+/// pyarrow's own -- do not need affinity.
+const AFFINE_THREAD_BUDGET: usize = 128;
+
+/// Permits for [`AFFINE_THREAD_BUDGET`], released when a pull thread exits.
+fn affine_thread_budget() -> &'static Arc<Semaphore> {
+    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    BUDGET.get_or_init(|| Arc::new(Semaphore::new(AFFINE_THREAD_BUDGET)))
+}
 
 /// Owns a [`BatchPull`] between rounds and guarantees the closure is destroyed on
 /// the blocking pool.
@@ -143,21 +163,180 @@ impl Drop for PullGuard {
     }
 }
 
+/// One drain round handed to a stream's pull thread.
+struct PullJob {
+    permit: OwnedPermit<Result<RecordBatch>>,
+    demand: Arc<Semaphore>,
+    schema: SchemaRef,
+    /// Released only when the round finishes, so a pull that never returns keeps
+    /// whatever it drew from the speculation budget.
+    credit: Credit,
+    /// `Ok(true)` => the stream is finished; `Err` carries a panic payload to
+    /// re-raise on the consumer.
+    done: tokio::sync::oneshot::Sender<std::thread::Result<bool>>,
+}
+
+/// Sent to a stream's pull thread: the reader first, then one message per round.
+///
+/// The reader travels over the channel rather than into the thread closure so a
+/// failed spawn hands it back instead of dropping it on the calling thread (which
+/// is usually an async worker, where destroying Python state must not happen).
+enum PullMessage {
+    Init(BatchPull),
+    Job(PullJob),
+}
+
+/// Where a stream's pull runs.
+enum PullHost {
+    /// One thread for the stream's whole life: the reader is created, resumed and
+    /// destroyed on the same thread, so thread-affine readers keep working.
+    Affine(std::sync::mpsc::Sender<PullMessage>),
+    /// A fresh blocking-pool task per round. No affinity, but no thread is held
+    /// while the stream is idle.
+    Pool(PullGuard),
+}
+
+impl PullHost {
+    /// Prefer a dedicated thread; fall back to the pool when the budget is spent
+    /// or the thread cannot be spawned.
+    fn new(pull: BatchPull, read_ahead: ReadAhead) -> Self {
+        let Ok(budget) = Arc::clone(affine_thread_budget()).try_acquire_owned() else {
+            return Self::Pool(PullGuard::new(pull));
+        };
+        let (jobs, requests) = std::sync::mpsc::channel::<PullMessage>();
+        let spawned = std::thread::Builder::new()
+            .name("xorq-pull".to_string())
+            .spawn(move || {
+                // Released when this thread exits, so the budget counts live pull
+                // threads rather than streams that once had one.
+                let _budget = budget;
+                run_affine_pull(requests, read_ahead);
+            });
+        // Thread limit reached, or the thread died before taking the reader: the
+        // pool still works, just without affinity.
+        match spawned {
+            Ok(_handle) => match jobs.send(PullMessage::Init(pull)) {
+                Ok(()) => Self::Affine(jobs),
+                Err(returned) => match returned.0 {
+                    PullMessage::Init(pull) => Self::Pool(PullGuard::new(pull)),
+                    PullMessage::Job(_) => unreachable!("only Init is sent here"),
+                },
+            },
+            Err(_) => Self::Pool(PullGuard::new(pull)),
+        }
+    }
+
+    /// Run one drain round. `Ok(true)` => the stream is finished.
+    async fn round(
+        &mut self,
+        permit: OwnedPermit<Result<RecordBatch>>,
+        demand: &Arc<Semaphore>,
+        schema: &SchemaRef,
+        credit: Credit,
+        read_ahead: ReadAhead,
+    ) -> Result<bool> {
+        match self {
+            Self::Affine(jobs) => {
+                let (done, finished) = tokio::sync::oneshot::channel();
+                let job = PullJob {
+                    permit,
+                    demand: Arc::clone(demand),
+                    schema: Arc::clone(schema),
+                    credit,
+                    done,
+                };
+                if jobs.send(PullMessage::Job(job)).is_err() {
+                    // The pull thread is gone (it only exits after reporting the
+                    // end of the stream, or after a panic it already reported).
+                    return Ok(true);
+                }
+                match finished.await {
+                    Ok(Ok(ended)) => Ok(ended),
+                    Ok(Err(panic)) => std::panic::resume_unwind(panic),
+                    // Thread died without reporting: treat as end of stream.
+                    Err(_) => Ok(true),
+                }
+            }
+            Self::Pool(guard) => {
+                let pull = guard.take();
+                let demand = Arc::clone(demand);
+                let schema = Arc::clone(schema);
+                let joined = tokio::task::spawn_blocking(move || {
+                    let mut pull = pull;
+                    let _credit = credit;
+                    let ended = drain_batches(&mut pull, permit, &demand, read_ahead, &schema);
+                    (ended, pull)
+                })
+                .await;
+                match joined {
+                    Ok((ended, returned)) => {
+                        guard.put(returned);
+                        Ok(ended)
+                    }
+                    // The pull panicked (the closure died with its task, so the
+                    // guard is already empty). Re-raise here so the builder can
+                    // resume the original payload on the consumer instead of an
+                    // opaque JoinError.
+                    Err(join_err) if join_err.is_panic() => {
+                        std::panic::resume_unwind(join_err.into_panic())
+                    }
+                    Err(join_err) => Err(datafusion_common::DataFusionError::External(Box::new(
+                        join_err,
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+/// Body of a stream's dedicated pull thread.
+///
+/// Parks in `recv()` between rounds, so dropping the stream (which drops the job
+/// sender) wakes it: the reader is destroyed here, on a thread that may hold the
+/// GIL and that created it in the first place.
+fn run_affine_pull(requests: std::sync::mpsc::Receiver<PullMessage>, read_ahead: ReadAhead) {
+    let Ok(PullMessage::Init(mut pull)) = requests.recv() else {
+        return;
+    };
+    while let Ok(PullMessage::Job(job)) = requests.recv() {
+        let PullJob {
+            permit,
+            demand,
+            schema,
+            credit,
+            done,
+        } = job;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain_batches(&mut pull, permit, &demand, read_ahead, &schema)
+        }));
+        drop(credit);
+        let ended = matches!(outcome, Ok(true) | Err(_));
+        // The receiver is gone if the query was cancelled; nothing to report to.
+        let _ = done.send(outcome);
+        if ended {
+            break;
+        }
+    }
+}
+
 /// Bridge a synchronous, blocking `pull` (a Python reader) to an async
 /// `SendableRecordBatchStream` without ever pinning a blocking-pool thread while
 /// idle.
 ///
 /// A coordinator *async task* runs the pull loop: it awaits demand from the
 /// consumer and a free channel slot (parking as a cheap async task -- no thread --
-/// when the consumer is slow or has stopped) and only then pulls on the blocking
-/// pool via `spawn_blocking`. That blocking task drains batches only while demand
-/// and slots remain, and returns its thread as soon as either runs out, so a
-/// stream that is polled once and then abandoned (kept alive but not drained)
-/// holds **zero** blocking threads -- it just parks the coordinator. This avoids
-/// the blocking-pool exhaustion hang a lifetime producer parked in
-/// `blocking_send` causes once enough streams are abandoned. Draining several
-/// batches per dispatch (rather than one) keeps the per-batch cost of a
-/// many-small-batches scan at roughly one channel send.
+/// when the consumer is slow or has stopped) and only then dispatches a drain
+/// round to the stream's [`PullHost`]. A round ends as soon as demand or slots run
+/// out, so an abandoned stream (kept alive but not drained) never sits in a pull:
+/// it holds at most its parked pull thread, which wakes and exits when the stream
+/// is dropped. That is what avoids the blocking-pool exhaustion hang a lifetime
+/// producer parked in `blocking_send` causes. Draining several batches per round
+/// (rather than one) keeps the per-batch cost of a many-small-batches scan at
+/// roughly one channel send.
+///
+/// Batches are checked against `schema` before they are forwarded: a drifted batch
+/// fails the query rather than reaching kernels that trust the plan's types and
+/// panic.
 ///
 /// Read-ahead is governed by `read_ahead` (see [`ReadAhead`]): with
 /// [`ReadAhead::OnDemand`] the producer pulls only batches the consumer has polled
@@ -170,8 +349,9 @@ impl Drop for PullGuard {
 /// blocking call -- so a pull that blocks forever holds its thread until it
 /// returns.
 ///
-/// GIL discipline: the pull runs inside `spawn_blocking` (never an async worker)
-/// and is dropped there as well, so taking the GIL in either is safe.
+/// GIL discipline: the pull runs on a pull thread or the blocking pool (never an
+/// async worker) and is dropped there as well, so taking the GIL in either is
+/// safe.
 pub fn spawn_channel_stream(
     schema: SchemaRef,
     pull: BatchPull,
@@ -187,8 +367,9 @@ pub fn spawn_channel_stream(
     let demand = Arc::new(Semaphore::new(0));
     let producer_demand = Arc::clone(&demand);
 
+    let producer_schema = Arc::clone(&schema);
     builder.spawn(async move {
-        let mut guard = PullGuard::new(pull);
+        let mut host = PullHost::new(pull, read_ahead);
         loop {
             // Pull on demand, or speculatively while the budget allows. Falling
             // back to waiting for demand is always safe -- read-ahead is an
@@ -216,37 +397,18 @@ pub fn spawn_channel_stream(
             let Ok(permit) = tx.clone().reserve_owned().await else {
                 break;
             };
-            // Pull on the blocking pool; the closure is moved in and handed back
-            // so its reader survives across rounds.
-            let pull = guard.take();
-            let round_demand = Arc::clone(&producer_demand);
-            let joined = tokio::task::spawn_blocking(move || {
-                let mut pull = pull;
-                // `credit` (and any the drain takes) is released only when the
-                // pull returns, so a pull that never returns keeps it.
-                let _credit = credit;
-                let ended = drain_batches(&mut pull, permit, &round_demand, read_ahead);
-                (ended, pull)
-            })
-            .await;
-            match joined {
-                Ok((ended, returned)) => {
-                    guard.put(returned);
-                    if ended {
-                        break;
-                    }
-                }
-                // The pull panicked (the closure died with its task, so the guard
-                // is already empty). Re-raise here so the builder can resume the
-                // original payload on the consumer instead of an opaque JoinError.
-                Err(join_err) if join_err.is_panic() => {
-                    std::panic::resume_unwind(join_err.into_panic())
-                }
-                Err(join_err) => {
-                    return Err(datafusion_common::DataFusionError::External(Box::new(
-                        join_err,
-                    )))
-                }
+            // Never on an async worker: the pull holds the GIL and blocks.
+            if host
+                .round(
+                    permit,
+                    &producer_demand,
+                    &producer_schema,
+                    credit,
+                    read_ahead,
+                )
+                .await?
+            {
+                break;
             }
         }
         Ok(())
@@ -294,6 +456,41 @@ impl RecordBatchStream for DemandStream {
     }
 }
 
+/// Reject a batch whose columns do not line up with the schema the plan
+/// advertises.
+///
+/// Names and types must match positionally; nullability and metadata are not
+/// compared, because pyarrow readers routinely differ there without affecting how
+/// the data is read.
+fn check_batch_schema(schema: &SchemaRef, batch: &RecordBatch) -> Result<()> {
+    let actual = batch.schema_ref();
+    if Arc::ptr_eq(schema, actual) {
+        return Ok(());
+    }
+    let matches = schema.fields().len() == actual.fields().len()
+        && schema
+            .fields()
+            .iter()
+            .zip(actual.fields())
+            .all(|(want, got)| want.name() == got.name() && want.data_type() == got.data_type());
+    if matches {
+        return Ok(());
+    }
+    let describe = |s: &arrow::datatypes::Schema| {
+        s.fields()
+            .iter()
+            .map(|f| format!("{}: {}", f.name(), f.data_type()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(datafusion_common::DataFusionError::Execution(format!(
+        "reader produced a batch that does not match the table schema: \
+         expected [{}], got [{}]",
+        describe(schema),
+        describe(actual)
+    )))
+}
+
 /// Pull batches into `permit`'s channel while credit and free slots both last.
 /// Returns `true` when the stream is finished (input exhausted or terminal error).
 ///
@@ -306,6 +503,7 @@ fn drain_batches(
     permit: OwnedPermit<Result<RecordBatch>>,
     demand: &Semaphore,
     read_ahead: ReadAhead,
+    schema: &SchemaRef,
 ) -> bool {
     let mut permit = permit;
     // Held for as long as this dispatch runs, so a pull that never returns keeps
@@ -314,6 +512,14 @@ fn drain_batches(
     loop {
         match pull() {
             Some(Ok(batch)) => {
+                // A batch that does not match the advertised schema is terminal:
+                // downstream kernels trust the plan's schema and panic on a
+                // mismatch (arrow's `as_primitive` on a string column), which
+                // takes the process down instead of failing the query.
+                if let Err(e) = check_batch_schema(schema, &batch) {
+                    permit.send(Err(e));
+                    return true;
+                }
                 let tx = permit.send(Ok(batch));
                 // Take the next slot before the credit for it, so credit is never
                 // consumed without a batch to put in it. Channel full (consumer

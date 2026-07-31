@@ -7,6 +7,7 @@ for all supported Arrow return types, including binary variants.
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 
 import pyarrow as pa
@@ -270,3 +271,80 @@ def test_provider_scan_pulls_only_what_is_consumed():
     while time.monotonic() < deadline:
         assert len(abandoned) == 1, f"read ahead {len(abandoned)} batches while idle"
         time.sleep(0.05)
+
+
+def _thread_recording_provider(threads_per_stream):
+    """Provider whose reader records the thread each batch is produced on."""
+
+    schema = pa.schema([("a", pa.int64())])
+
+    class RecordingProvider:
+        def schema(self):
+            return schema
+
+        def scan(self, filters=None):
+            seen = set()
+            threads_per_stream.append(seen)
+
+            def gen():
+                for i in range(60):
+                    seen.add(threading.get_ident())
+                    yield pa.record_batch(
+                        {"a": pa.array([i], type=pa.int64())}, schema=schema
+                    )
+
+            return pa.RecordBatchReader.from_batches(schema, gen())
+
+    return RecordingProvider()
+
+
+def test_reader_stays_on_one_thread_across_batches():
+    """Every batch of a stream must be produced on the same thread.
+
+    A reader created lazily on the first pull may be bound to that thread
+    (`sqlite3` cursors, `threading.local()`), so resuming it elsewhere breaks it.
+    Several streams run concurrently because that is what shuffles pulls across
+    threads when the reader is not pinned.
+    """
+    threads_per_stream = []
+    ctx = xdf.SessionContext()
+    ctx.register_table_provider("t", _thread_recording_provider(threads_per_stream))
+
+    def drain():
+        rows = 0
+        for batch in ctx.sql("SELECT * FROM t").execute_stream():
+            rows += batch.to_pyarrow().num_rows
+            time.sleep(0.001)  # keep rounds re-dispatching
+        assert rows == 60, rows
+
+    workers = [threading.Thread(target=drain) for _ in range(8)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+
+    assert len(threads_per_stream) == 8
+    for seen in threads_per_stream:
+        assert len(seen) == 1, f"reader moved across {len(seen)} threads"
+
+
+def test_batch_not_matching_schema_fails_the_query():
+    """A drifted batch must fail the query, not reach kernels that trust the
+    declared types and panic (arrow's `as_primitive` on a string column)."""
+    schema = pa.schema([("a", pa.int64())])
+
+    class DriftingProvider:
+        def schema(self):
+            return schema
+
+        def scan(self, filters=None):
+            def gen():
+                yield pa.record_batch({"a": pa.array([1, 2], type=pa.int64())})
+                yield pa.record_batch({"a": pa.array(["x"], type=pa.string())})
+
+            return pa.RecordBatchReader.from_batches(schema, gen())
+
+    ctx = xdf.SessionContext()
+    ctx.register_table_provider("drift", DriftingProvider())
+    with pytest.raises(Exception, match="does not match the table schema"):
+        ctx.sql("SELECT a, a + 1 AS b FROM drift").collect()
