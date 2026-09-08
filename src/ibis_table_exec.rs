@@ -9,7 +9,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::project_schema;
 use datafusion_common::DataFusionError as InnerDataFusionError;
-use pyo3::types::{PyIterator, PyList};
+use pyo3::types::PyIterator;
 use pyo3::{Bound, Py, PyAny, Python};
 
 use crate::errors::DataFusionError;
@@ -23,7 +23,8 @@ pub struct IbisTableExec {
     /// touching the GIL (see the comment there).
     record_batch_reader: Arc<Py<PyAny>>,
     schema: SchemaRef,
-    columns: Option<Vec<String>>,
+    /// Column indices to keep, applied to each batch in Rust.
+    projection: Option<Vec<usize>>,
     cache: Arc<PlanProperties>,
 }
 
@@ -33,21 +34,6 @@ impl IbisTableExec {
         record_batch_reader: &Bound<'_, PyAny>,
         projections: Option<&Vec<usize>>,
     ) -> Result<Self, DataFusionError> {
-        // TODO use indices instead of columns
-        let columns: Option<Result<Vec<String>, DataFusionError>> = projections.map(|p| {
-            p.iter()
-                .map(|index| {
-                    let name: String = record_batch_reader
-                        .getattr("schema")?
-                        .call_method1("field", (*index,))?
-                        .getattr("name")?
-                        .extract()?;
-                    Ok(name)
-                })
-                .collect()
-        });
-        let columns: Option<Vec<String>> = columns.transpose()?;
-
         let schema: SchemaRef = Arc::new(
             record_batch_reader
                 .getattr("schema")?
@@ -61,31 +47,9 @@ impl IbisTableExec {
         Ok(IbisTableExec {
             record_batch_reader: Arc::new(record_batch_reader.clone().unbind()),
             schema,
-            columns,
+            projection: projections.cloned(),
             cache,
         })
-    }
-}
-
-/// Per-stream Python state, built on the first pull (on the blocking pool) and
-/// reused for every batch of that stream.
-struct PullState {
-    iter: Py<PyIterator>,
-    /// The projection as a Python list, converted once instead of per batch.
-    projection: Option<Py<PyList>>,
-}
-
-impl PullState {
-    fn new(
-        py: Python,
-        record_batch_reader: &Py<PyAny>,
-        columns: Option<&[String]>,
-    ) -> PyResult<Self> {
-        let iter = PyIterator::from_object(record_batch_reader.bind(py))?.unbind();
-        let projection = columns
-            .map(|cols| PyList::new(py, cols).map(|list| list.unbind()))
-            .transpose()?;
-        Ok(Self { iter, projection })
     }
 }
 
@@ -130,42 +94,54 @@ impl ExecutionPlan for IbisTableExec {
         _context: Arc<TaskContext>,
     ) -> datafusion_common::Result<SendableRecordBatchStream> {
         let schema = self.schema.clone();
-        let columns = self.columns.clone();
+        let projection = self.projection.clone();
         // Arc clone -- no GIL: execute() runs on whatever thread the parent plan
         // polls from, which is frequently an async worker.
         let record_batch_reader = Arc::clone(&self.record_batch_reader);
 
         // The pull closure runs on the blocking pool (see spawn_channel_stream), so
-        // it may hold the GIL. The Python iterator and the projection list are both
-        // built lazily on the first pull rather than here, so GIL acquisition never
-        // lands on an async worker. A re-entrant reader (a Python `scan()`
-        // generator that drains a nested execute_stream) releases the GIL again
-        // internally via wait_for_future's py.detach, so nested runtime work never
-        // holds the GIL here.
-        let mut state: Option<PullState> = None;
+        // it may hold the GIL. The Python iterator is built lazily on the first pull
+        // rather than here, so GIL acquisition never lands on an async worker. A
+        // re-entrant reader (a Python `scan()` generator that drains a nested
+        // execute_stream) releases the GIL again internally via wait_for_future's
+        // py.detach, so nested runtime work never holds the GIL here.
+        let mut iter: Option<Py<PyIterator>> = None;
         let pull: crate::utils::BatchPull = Box::new(move || {
-            Python::attach(|py| {
-                if state.is_none() {
-                    // Iterator and projection list are built once per stream, not
-                    // rebuilt for every batch.
-                    match PullState::new(py, &record_batch_reader, columns.as_deref()) {
-                        Ok(built) => state = Some(built),
+            // Each batch is imported with its *own* schema (`__arrow_c_array__`
+            // carries schema + array), so a batch that contradicts the declared
+            // schema is caught by spawn_channel_stream's check instead of being
+            // reinterpreted under the declared types. That is why this path keeps
+            // the Python iterator rather than moving to `__arrow_c_stream__`, whose
+            // ABI sends the schema once and bare arrays after: there, a reader that
+            // declares `utf8` and yields `large_utf8` silently corrupts the scan.
+            let pulled = Python::attach(|py| {
+                if iter.is_none() {
+                    // Built once per stream, not rebuilt for every batch.
+                    match PyIterator::from_object(record_batch_reader.bind(py)) {
+                        Ok(built) => iter = Some(built.unbind()),
                         Err(e) => return Some(Err(InnerDataFusionError::External(Box::new(e)))),
                     }
                 }
-                let state = state.as_ref().expect("initialized above");
-                let mut bound_iter = state.iter.clone_ref(py).into_bound(py);
+                let mut bound_iter = iter
+                    .as_ref()
+                    .expect("initialized above")
+                    .clone_ref(py)
+                    .into_bound(py);
                 bound_iter.next().map(|res| {
-                    res.and_then(|batch| {
-                        let batch = match &state.projection {
-                            Some(cols) => batch.call_method1("select", (cols.bind(py),))?,
-                            None => batch,
-                        };
-                        Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0)
-                    })
-                    .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
+                    res.and_then(|batch| Ok(batch.extract::<PyArrowType<RecordBatch>>()?.0))
+                        .map_err(|e: PyErr| InnerDataFusionError::External(Box::new(e)))
                 })
-            })
+            });
+
+            // Projected in Rust, with the GIL already released: `select` on the
+            // Python batch cost a method call and an intermediate pyarrow object
+            // per batch, and both are pure overhead next to `RecordBatch::project`.
+            match (pulled, &projection) {
+                (Some(Ok(batch)), Some(indices)) => {
+                    Some(batch.project(indices).map_err(InnerDataFusionError::from))
+                }
+                (pulled, _) => pulled,
+            }
         });
 
         // Arbitrary user Python: pull only what the query polls for, so a reader
