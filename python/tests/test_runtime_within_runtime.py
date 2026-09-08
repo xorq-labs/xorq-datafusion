@@ -112,8 +112,11 @@ class _SchemaReentrantProvider(_ScanReentrantProvider):
     """
     Provider whose `schema` *also* re-enters the runtime.
 
-    `schema()` is called during the outer context's planning, which itself runs
-    inside `block_on`; resolving it via `src_ctx.sql(...)` re-enters there too.
+    `register_table_provider` reads the schema once and caches it, so this
+    re-entry happens on the registering thread rather than from inside the outer
+    query's `block_on`; `scan()` still re-enters during planning. Both must
+    resolve, and a provider that resolves its schema by querying another context
+    must keep working.
     """
 
     def schema(self):
@@ -225,8 +228,10 @@ def test_reentrant_scan_returns_inner_rows(values):
 @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 def test_reentrant_schema_returns_inner_rows(values):
     """
-    A provider whose schema() re-enters during planning (not just scan) still
-    resolves and returns the inner rows.
+    A provider that resolves its schema by re-entering the runtime still resolves
+    and returns the inner rows. The schema re-entry happens at registration (the
+    schema is read once and cached there); the scan re-entry still happens during
+    planning.
     """
     inner = SessionContext()
     _register_values(inner, "inner_t", values)

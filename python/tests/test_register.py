@@ -79,6 +79,69 @@ def test_register_table_provider_reader_error_is_not_swallowed(ctx, sql, drive):
         drive(ctx.sql(sql))
 
 
+class _RaisingSchemaProvider(AbstractTableProvider):
+    """schema() raises; scan() is never reached."""
+
+    def schema(self):
+        raise RuntimeError("no schema for you")
+
+    def scan(self, filters=None):
+        raise AssertionError("scan must not be reached")
+
+
+class _NotASchemaProvider(AbstractTableProvider):
+    """schema() returns something that is not a pyarrow Schema."""
+
+    def schema(self):
+        return 42
+
+    def scan(self, filters=None):
+        raise AssertionError("scan must not be reached")
+
+
+@pytest.mark.parametrize(
+    ("provider", "match"),
+    [
+        (_RaisingSchemaProvider(), "no schema for you"),
+        (_NotASchemaProvider(), "Schema"),
+    ],
+    ids=["raises", "wrong-type"],
+)
+def test_register_table_provider_bad_schema_fails_at_registration(ctx, provider, match):
+    """A provider schema that cannot be read must fail the registration call.
+
+    The schema is read once at registration rather than on every planner call,
+    so a bad one surfaces here as a Python exception instead of panicking on
+    whichever thread happens to be planning.
+    """
+    with pytest.raises(Exception, match=match):
+        ctx.register_table_provider("bad", provider)
+
+    assert not ctx.table_exist("bad")
+
+
+def test_register_table_provider_reads_schema_once(ctx, data_dir):
+    """The planner must not call back into `schema()` for every plan."""
+    table = ibis.read_parquet(data_dir / "data.rownum.parquet")
+
+    class CountingProvider(IbisTableProvider):
+        def __init__(self, table):
+            super().__init__(table)
+            self.schema_calls = 0
+
+        def schema(self):
+            self.schema_calls += 1
+            return super().schema()
+
+    provider = CountingProvider(table)
+    ctx.register_table_provider("counted", provider)
+    assert provider.schema_calls == 1
+
+    for _ in range(3):
+        assert not ctx.sql("select * from counted").to_pandas().empty
+    assert provider.schema_calls == 1
+
+
 def test_register_csv_multiple_paths(ctx, data_dir):
     fname = "iris.csv"
     table_name = "iris"

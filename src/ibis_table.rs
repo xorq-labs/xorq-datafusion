@@ -24,6 +24,13 @@ use pyo3::prelude::*;
 #[derive(Debug)]
 pub(crate) struct IbisTable {
     ibis_table: Py<PyAny>,
+    /// Resolved once here rather than on every `schema()` call, which ran a full
+    /// ibis `schema().to_pyarrow()` round-trip. `schema()` is called while
+    /// planning, so that round-trip held the GIL on whichever thread is planning
+    /// -- frequently an async worker, where holding the GIL risks the GIL/mutex
+    /// inversion. Resolving it here also lets a bad schema fail registration
+    /// instead of panicking mid-plan.
+    schema: SchemaRef,
 }
 
 impl IbisTable {
@@ -34,8 +41,16 @@ impl IbisTable {
         let table_type = table.cast::<PyType>()?;
 
         if ibis_table.is_instance(table_type)? {
+            let schema = Arc::new(
+                ibis_table
+                    .call_method0("schema")?
+                    .call_method0("to_pyarrow")?
+                    .extract::<PyArrowType<_>>()?
+                    .0,
+            );
             Ok(IbisTable {
                 ibis_table: ibis_table.clone().unbind(),
+                schema,
             })
         } else {
             Err(PyValueError::new_err(
@@ -52,19 +67,7 @@ impl TableProvider for IbisTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        Python::attach(|py| {
-            let batch_reader = self.ibis_table.bind(py);
-            Arc::new(
-                batch_reader
-                    .call_method0("schema")
-                    .unwrap()
-                    .call_method0("to_pyarrow")
-                    .unwrap()
-                    .extract::<PyArrowType<_>>()
-                    .unwrap()
-                    .0,
-            )
-        })
+        self.schema.clone()
     }
 
     fn table_type(&self) -> TableType {

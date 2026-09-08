@@ -22,6 +22,15 @@ use pyo3::prelude::*;
 #[derive(Debug)]
 pub struct PyTableProvider {
     table_provider: Py<PyAny>,
+    /// Read once here rather than on every `schema()` call, which called back
+    /// into user Python. `schema()` is called while planning, so that callback
+    /// held the GIL on whichever thread is planning -- frequently an async
+    /// worker, where holding the GIL risks the GIL/mutex inversion. A provider
+    /// whose `schema()` itself re-enters the runtime therefore does so here, on
+    /// the registering thread, instead of from inside the outer query's
+    /// `block_on`. Reading it here also lets a failing `schema()` surface as a
+    /// registration error instead of panicking mid-plan.
+    schema: SchemaRef,
 }
 
 #[pymethods]
@@ -29,8 +38,15 @@ impl PyTableProvider {
     #[new]
     #[pyo3(signature=(table_provider))]
     pub fn new(table_provider: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let schema = Arc::new(
+            table_provider
+                .call_method0("schema")?
+                .extract::<PyArrowType<_>>()?
+                .0,
+        );
         Ok(Self {
             table_provider: table_provider.clone().into(),
+            schema,
         })
     }
 }
@@ -42,17 +58,7 @@ impl TableProvider for PyTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        Python::attach(|py| {
-            let table_provider = self.table_provider.bind(py);
-            Arc::new(
-                table_provider
-                    .call_method0("schema")
-                    .unwrap()
-                    .extract::<PyArrowType<_>>()
-                    .unwrap()
-                    .0,
-            )
-        })
+        self.schema.clone()
     }
 
     fn table_type(&self) -> TableType {
