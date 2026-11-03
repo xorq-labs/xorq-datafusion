@@ -9,6 +9,9 @@ from xorq_datafusion import (
     SessionConfig,
     SessionContext,
 )
+from xorq_datafusion._internal import expr as _expr
+
+Expr = _expr.Expr
 
 
 def test_create_context_no_args():
@@ -68,6 +71,35 @@ def test_register_record_batch_reader_replay(ctx):
         result = ctx.sql("SELECT a+b, a-b FROM t").collect()
         assert result[0].column(0) == expected_sum
         assert result[0].column(1) == expected_diff
+
+
+def _physical_plan(ctx, sql):
+    explain = pa.Table.from_batches(ctx.sql(f"EXPLAIN {sql}").collect())
+    plans = dict(zip(*(explain.column(i).to_pylist() for i in range(2)), strict=True))
+    return plans["physical_plan"]
+
+
+def test_register_record_batch_reader_sort_order_survives_projection(ctx):
+    """The declared sort order must be remapped onto the projected schema: with
+    the sort key at index 2 of the table but index 0 of the scan, a query that
+    orders by it needs no SortExec."""
+    table = pa.table({"a": [4, 1, 3, 2], "b": [40, 10, 30, 20], "c": [1, 2, 3, 4]})
+
+    ctx.register_record_batch_reader(
+        "t", table, sort_order=[Expr.column("c").sort(True, False)]
+    )
+
+    assert "SortExec" not in _physical_plan(ctx, "SELECT c FROM t ORDER BY c")
+    assert "SortExec" in _physical_plan(ctx, "SELECT a FROM t ORDER BY a")
+
+    result = pa.Table.from_batches(ctx.sql("SELECT c FROM t ORDER BY c").collect())
+    assert result.column("c").to_pylist() == [1, 2, 3, 4]
+
+
+def test_register_record_batch_reader_is_base_table(ctx):
+    ctx.register_record_batch_reader("t", pa.table({"a": [1]}))
+
+    assert ctx.catalog().database().table("t").kind == "physical"
 
 
 def test_register_record_batch_reader_lazy(ctx):

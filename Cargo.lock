@@ -4781,7 +4781,6 @@ name = "xorq-datafusion"
 version = "0.2.11"
 dependencies = [
  "arrow",
- "arrow-ord",
  "async-trait",
  "aws-config",
  "aws-credential-types",

@@ -7,7 +7,7 @@ use arrow::array::ArrayRef;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_expr::{EquivalenceProperties, LexOrdering, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchReceiverStream;
 use datafusion::physical_plan::{PlanProperties, RecordBatchStream};
@@ -618,24 +618,6 @@ pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionErro
 
 pub fn compute_properties(schema: SchemaRef) -> Arc<PlanProperties> {
     let eq_properties = EquivalenceProperties::new(schema);
-
-    Arc::new(PlanProperties::new(
-        eq_properties,
-        Partitioning::UnknownPartitioning(1),
-        EmissionType::Incremental,
-        Boundedness::Bounded,
-    ))
-}
-
-pub fn compute_properties_with_orderings(
-    schema: SchemaRef,
-    orderings: &[LexOrdering],
-) -> Arc<PlanProperties> {
-    let eq_properties = if orderings.is_empty() {
-        EquivalenceProperties::new(Arc::clone(&schema))
-    } else {
-        EquivalenceProperties::new_with_orderings(Arc::clone(&schema), orderings.to_vec())
-    };
 
     Arc::new(PlanProperties::new(
         eq_properties,

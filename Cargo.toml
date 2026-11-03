@@ -21,7 +21,6 @@ datafusion-sql = "53"
 futures = "0.3"
 async-trait = "=0.1.89"
 arrow = { version = "58", features = ["pyarrow"] }
-arrow-ord = "58"
 aws-config = "=0.101.0"
 aws-credential-types = "=0.101.0"
 object_store = { version = "0.13.1", features = ["aws", "gcp", "http"] }

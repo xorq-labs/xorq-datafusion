@@ -15,7 +15,6 @@ use crate::udaf::PyAggregateUDF;
 use crate::udf::PyScalarUDF;
 use crate::udwf::PyWindowUDF;
 use crate::utils::wait_for_future;
-use arrow_ord::sort::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -27,7 +26,6 @@ use datafusion::execution::context::{DataFilePaths, SessionConfig, SessionContex
 use datafusion::execution::options::ReadOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::physical_expr::{expressions, LexOrdering, PhysicalSortExpr};
 use datafusion::prelude::{CsvReadOptions, DataFrame, ParquetReadOptions};
 use datafusion_common::config::ConfigFileType;
 use datafusion_common::{exec_err, ScalarValue, TableReference};
@@ -38,7 +36,6 @@ use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -401,31 +398,22 @@ impl PySessionContext {
                 .0,
         );
 
+        // Only plain columns are accepted. The ordering stops at the first column
+        // the schema does not have: a sort prefix is still a valid ordering, a
+        // sort with a gap in it is not.
         let mut ordering = vec![];
-        if let Some(exprs) = sort_order {
-            for sort in exprs {
-                match sort.sort.expr {
-                    Expr::Column(col) => match expressions::col(&col.name, schema.deref()) {
-                        Ok(expr) => {
-                            ordering.push(PhysicalSortExpr {
-                                expr,
-                                options: SortOptions {
-                                    descending: !sort.sort.asc,
-                                    nulls_first: sort.sort.nulls_first,
-                                },
-                            });
-                        }
-                        Err(_) => break,
-                    },
-                    expr => {
-                        return Err(PyValueError::new_err(format!("Unsupported expr {expr:?}")));
-                    }
+        for sort in sort_order.into_iter().flatten() {
+            match &sort.sort.expr {
+                Expr::Column(col) if schema.index_of(&col.name).is_ok() => ordering.push(sort.sort),
+                Expr::Column(_) => break,
+                expr => {
+                    return Err(PyValueError::new_err(format!("Unsupported expr {expr:?}")));
                 }
             }
         }
-        let ordering_option = LexOrdering::new(ordering);
 
-        let table = PyRecordBatchProvider::new(reader.unbind(), schema, ordering_option);
+        let table = PyRecordBatchProvider::try_new(reader.unbind(), schema, ordering)
+            .map_err(from_datafusion_error)?;
         self.ctx
             .register_table(name, Arc::new(table))
             .map_err(from_datafusion_error)?;
