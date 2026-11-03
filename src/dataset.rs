@@ -40,6 +40,12 @@ use crate::pyarrow_filter_expression::PyArrowFilterExpression;
 #[derive(Debug)]
 pub(crate) struct Dataset {
     dataset: Py<PyAny>,
+    /// Read once here rather than on every `schema()` call. `schema()` is called
+    /// while planning, so reading it there took the GIL on whichever thread is
+    /// planning -- frequently an async worker, where holding the GIL risks the
+    /// GIL/mutex inversion. Reading it here also lets a bad schema fail
+    /// registration instead of panicking mid-plan.
+    schema: SchemaRef,
 }
 
 impl Dataset {
@@ -50,8 +56,10 @@ impl Dataset {
         let ds_attr = ds.getattr("Dataset")?;
         let ds_type = ds_attr.cast::<PyType>()?;
         if dataset.is_instance(ds_type)? {
+            let schema = Arc::new(dataset.getattr("schema")?.extract::<PyArrowType<_>>()?.0);
             Ok(Dataset {
                 dataset: dataset.clone().unbind(),
+                schema,
             })
         } else {
             Err(PyValueError::new_err(
@@ -68,17 +76,7 @@ impl TableProvider for Dataset {
     }
 
     fn schema(&self) -> SchemaRef {
-        Python::attach(|py| {
-            let dataset = self.dataset.bind(py);
-            Arc::new(
-                dataset
-                    .getattr("schema")
-                    .unwrap()
-                    .extract::<PyArrowType<_>>()
-                    .unwrap()
-                    .0,
-            )
-        })
+        self.schema.clone()
     }
 
     fn table_type(&self) -> TableType {
