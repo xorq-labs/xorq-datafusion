@@ -52,14 +52,11 @@ jobs:
         run: uv sync --locked --group dev --group test --no-install-project
         working-directory: ${{ github.workspace }}
 
+      # Dev profile: the release profile (thin LTO, codegen-units = 2) is the
+      # slowest to build and buys nothing for running pytest. Built on the
+      # host, not in a manylinux container, so rust-cache sees ./target.
       - name: maturin develop
-        uses: PyO3/maturin-action@v1
-        with:
-          command: 'develop'
-          args: '--release --strip'
-          target: x86_64
-          sccache: 'true'
-          manylinux: 'auto'
+        run: uv run --no-sync maturin develop --uv
 
       - name: pytest
         run: uv run --no-sync pytest --import-mode=importlib --cov --cov-report=xml
