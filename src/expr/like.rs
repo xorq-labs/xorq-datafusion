@@ -48,10 +48,10 @@ impl Display for PyLike {
             Expr: {:?}
             Pattern: {:?}
             Escape_Char: {:?}",
-            &self.negated(),
-            &self.expr(),
-            &self.pattern(),
-            &self.escape_char()
+            self.negated(),
+            self.expr(),
+            self.pattern(),
+            self.escape_char()
         )
     }
 }
@@ -106,10 +106,10 @@ impl Display for PyILike {
             Expr: {:?}
             Pattern: {:?}
             Escape_Char: {:?}",
-            &self.negated(),
-            &self.expr(),
-            &self.pattern(),
-            &self.escape_char()
+            self.negated(),
+            self.expr(),
+            self.pattern(),
+            self.escape_char()
         )
     }
 }
@@ -169,10 +169,10 @@ impl Display for PySimilarTo {
             Expr: {:?}
             Pattern: {:?}
             Escape_Char: {:?}",
-            &self.negated(),
-            &self.expr(),
-            &self.pattern(),
-            &self.escape_char()
+            self.negated(),
+            self.expr(),
+            self.pattern(),
+            self.escape_char()
         )
     }
 }

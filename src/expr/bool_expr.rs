@@ -39,7 +39,7 @@ impl Display for PyNot {
             f,
             "Not
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -74,7 +74,7 @@ impl Display for PyIsNotNull {
             f,
             "IsNotNull
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -104,7 +104,7 @@ impl Display for PyIsNull {
             f,
             "IsNull
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -134,7 +134,7 @@ impl Display for PyIsTrue {
             f,
             "IsTrue
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -164,7 +164,7 @@ impl Display for PyIsFalse {
             f,
             "IsFalse
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -199,7 +199,7 @@ impl Display for PyIsUnknown {
             f,
             "IsUnknown
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -234,7 +234,7 @@ impl Display for PyIsNotTrue {
             f,
             "IsNotTrue
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -269,7 +269,7 @@ impl Display for PyIsNotFalse {
             f,
             "IsNotFalse
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -304,7 +304,7 @@ impl Display for PyIsNotUnknown {
             f,
             "IsNotUnknown
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }
@@ -339,7 +339,7 @@ impl Display for PyNegative {
             f,
             "Negative
             Expr: {}",
-            &self.expr
+            self.expr
         )
     }
 }

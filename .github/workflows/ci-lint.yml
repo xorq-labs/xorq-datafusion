@@ -53,6 +53,12 @@ jobs:
       - name: Run Ruff
         run: uv run --no-project ruff check --output-format=github python
 
+      # Without a cache, clippy compiles DataFusion and arrow from scratch on
+      # every run. The key includes the rustc version and Cargo.lock; on a
+      # miss it falls back to the newest cache and rebuilds only what changed.
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Run fmt
         uses: actions-rs/cargo@v1
         with:

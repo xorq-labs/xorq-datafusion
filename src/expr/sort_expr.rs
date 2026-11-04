@@ -51,7 +51,7 @@ impl Display for PySortExpr {
             Expr: {:?}
             Asc: {:?}
             NullsFirst: {:?}",
-            &self.sort.expr, &self.sort.asc, &self.sort.nulls_first
+            self.sort.expr, self.sort.asc, self.sort.nulls_first
         )
     }
 }

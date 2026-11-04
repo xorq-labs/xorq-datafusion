@@ -21,8 +21,12 @@ datafusion-sql = "53"
 futures = "0.3"
 async-trait = "=0.1.89"
 arrow = { version = "58", features = ["pyarrow"] }
-aws-config = "=0.101.0"
-aws-credential-types = "=0.101.0"
+# Default features pull in aws-lc-rs (a large C build); the rest of the tree
+# already uses ring, so the HTTPS client is configured with rustls-ring in
+# object_storage.rs instead.
+aws-config = { version = "1.8", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+aws-credential-types = "1.2"
+aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
 object_store = { version = "0.13.1", features = ["aws", "gcp", "http"] }
 url = "2.5.7"
 

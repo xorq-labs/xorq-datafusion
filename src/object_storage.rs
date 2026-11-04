@@ -30,6 +30,7 @@ use datafusion::execution::context::SessionState;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_credential_types::provider::ProvideCredentials;
+use aws_smithy_http_client::tls;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::prelude::SessionContext;
 use datafusion_common::config::ConfigFileType;
@@ -64,7 +65,15 @@ pub async fn get_s3_object_store_builder(
             builder = builder.with_token(session_token);
         }
     } else {
-        let config = aws_config::defaults(BehaviorVersion::v2023_11_09())
+        // aws-config is built without its default HTTPS client (which pulls in
+        // aws-lc-rs), so hand it one backed by ring, like the rest of the tree.
+        let http_client = aws_smithy_http_client::Builder::new()
+            .tls_provider(tls::Provider::Rustls(
+                tls::rustls_provider::CryptoMode::Ring,
+            ))
+            .build_https();
+        let config = aws_config::defaults(BehaviorVersion::v2026_01_12())
+            .http_client(http_client)
             .load()
             .await;
         if let Some(region) = config.region() {

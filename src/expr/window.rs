@@ -103,7 +103,7 @@ impl Display for PyWindow {
             "Over\n
             Window Expr: {:?}
             Schema: {:?}",
-            &self.window.window_expr, &self.window.schema
+            self.window.window_expr, self.window.schema
         )
     }
 }

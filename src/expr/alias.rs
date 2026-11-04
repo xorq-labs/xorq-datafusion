@@ -35,7 +35,7 @@ impl Display for PyAlias {
             "Alias
             \nExpr: `{:?}`
             \nAlias Name: `{}`",
-            &self.expr, &self.alias_name
+            self.expr, self.alias_name
         )
     }
 }
