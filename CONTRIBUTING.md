@@ -70,10 +70,16 @@ If the commit fixes a GitHub issue, add something like this to the bottom of the
 ***This section is intended for xorq-datafusion maintainers***
 
 #### Steps
+Steps 1-6 are automated by `scripts/release.sh <major|minor|patch>`. It starts
+from the `main` of the `upstream` remote (or `origin` if there is none; override
+with `RELEASE_REMOTE`), never pushes, and prints the remaining steps at the end.
+It needs `cargo` and `git-cliff` on the `PATH` (`git-cliff` is in the `dev`
+dependency group).
+
 1. Ensure you're on upstream main: `git switch main && git pull`
 2. Compute the new version number (`$version_number`) according to [Semantic Versioning](https://semver.org/) rules.
 3. Create a branch that starts from the upstream main: `git switch --create=release-$version_number`
-4. Update the version number in `Cargo.toml`: `version = "$version_number"`
+4. Update the version number in `Cargo.toml` (`version = "$version_number"`) and refresh `Cargo.lock`: `cargo update --workspace`
 5. Update the CHANGELOG using `git cliff --github-repo xorq-labs/xorq-datafusion -p CHANGELOG.md --tag v$version_number -u`, manually add any additional notes (links to blogposts, etc.).
 6. Create commit with message denoting the release: `git add --update && git commit -m "release: $version_number"`.
 7. Push the new branch: `git push --set-upstream upstream "release-$version_number"`
