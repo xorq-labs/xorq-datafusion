@@ -39,6 +39,16 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
 
+      # Rust coverage of the extension, exercised by the Python test suite.
+      # The toolchain comes from rust-toolchain.toml.
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -55,14 +65,22 @@ jobs:
       # Dev profile: the release profile (thin LTO, codegen-units = 2) is the
       # slowest to build and buys nothing for running pytest. Built on the
       # host, not in a manylinux container, so rust-cache sees ./target.
-      - name: maturin develop
-        run: uv run --no-sync maturin develop --uv
-
-      - name: pytest
-        run: uv run --no-sync pytest --import-mode=importlib --cov --cov-report=xml
+      #
+      # show-env installs cargo-llvm-cov as RUSTC_WRAPPER, which instruments
+      # only this crate: dependencies keep sharing the cargo cache. The env
+      # has to stay in one step, since its values are shell-quoted and
+      # cannot go through $GITHUB_ENV as-is.
+      - name: Build, test and collect coverage
+        run: |
+          eval "$(cargo llvm-cov show-env --sh)"
+          cargo llvm-cov clean --workspace
+          uv run --no-sync maturin develop --uv
+          uv run --no-sync pytest --import-mode=importlib --cov --cov-report=xml
+          cargo llvm-cov report --lcov --output-path coverage.lcov
         working-directory: ${{ github.workspace }}
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5.4.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml,coverage.lcov
