@@ -32,19 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: rust latest
-        run: rustup update
-
-      - name: cargo cache
-        uses: actions/cache@v4
+      # abi3 builds one binary for every Python version, so python-version
+      # is not part of the key. rust-cache adds the rustc version and
+      # Cargo.lock, and falls back to the newest cache on a miss.
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ./target/
-          key: cargo-cache-${{ matrix.python-version }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          key: ${{ matrix.target }}
 
       - uses: actions/setup-python@v5
         with:
