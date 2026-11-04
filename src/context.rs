@@ -634,7 +634,7 @@ impl PySessionContext {
             Some(catalog) => Ok(PyCatalog::new(catalog)),
             None => Err(PyKeyError::new_err(format!(
                 "Catalog with name {} doesn't exist.",
-                &name,
+                name,
             ))),
         }
     }

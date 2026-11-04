@@ -205,7 +205,7 @@ impl TableSource for SqlTableSource {
             .collect()
     }
 
-    fn get_logical_plan(&self) -> Option<Cow<datafusion::logical_expr::LogicalPlan>> {
+    fn get_logical_plan(&self) -> Option<Cow<'_, datafusion::logical_expr::LogicalPlan>> {
         None
     }
 }

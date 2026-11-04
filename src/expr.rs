@@ -323,7 +323,7 @@ impl PyExpr {
             Expr::Literal(scalar_value, _) => scalar_to_pyarrow(scalar_value, py),
             _ => Err(py_type_err(format!(
                 "Non Expr::Literal encountered in types: {:?}",
-                &self.expr
+                self.expr
             ))),
         }
     }
@@ -490,7 +490,7 @@ impl PyExpr {
             _ => {
                 return Err(py_type_err(format!(
                     "Catch all triggered in get_operator_name: {:?}",
-                    &self.expr
+                    self.expr
                 )))
             }
         })
@@ -519,7 +519,7 @@ impl PyExpr {
                 Ok(input_plan.schema().field(0).clone())
             }
             _ => {
-                let fields = exprlist_to_fields(&[expr.clone()], input_plan)?;
+                let fields = exprlist_to_fields(std::slice::from_ref(expr), input_plan)?;
                 Ok(fields[0].1.clone())
             }
         }

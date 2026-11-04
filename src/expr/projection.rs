@@ -62,7 +62,7 @@ impl Display for PyProjection {
             \nExpr(s): {:?}
             \nInput: {:?}
             \nProjected Schema: {:?}",
-            &self.projection.expr, &self.projection.input, &self.projection.schema,
+            self.projection.expr, self.projection.input, self.projection.schema,
         )
     }
 }

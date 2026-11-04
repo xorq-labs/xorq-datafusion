@@ -55,7 +55,7 @@ impl Display for PyDropTable {
             name: {:?}
             if_exists: {:?}
             schema: {:?}",
-            &self.drop.name, &self.drop.if_exists, &self.drop.schema,
+            self.drop.name, self.drop.if_exists, self.drop.schema,
         )
     }
 }
