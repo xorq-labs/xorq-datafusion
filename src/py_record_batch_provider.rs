@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -51,10 +50,6 @@ impl PyRecordBatchProvider {
 
 #[async_trait]
 impl TableProvider for PyRecordBatchProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.inner.schema()
     }

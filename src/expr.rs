@@ -25,7 +25,7 @@ use datafusion::functions::core::expr_ext::FieldAccessor;
 use datafusion::logical_expr::expr::AggregateFunctionParams;
 use datafusion_expr::{
     col,
-    expr::{AggregateFunction, InList, InSubquery, ScalarFunction},
+    expr::{AggregateFunction, HigherOrderFunction, InList, InSubquery, ScalarFunction},
     lit,
     utils::exprlist_to_fields,
     Between, BinaryExpr, Case, Cast, Expr, Like, LogicalPlan, Operator, TryCast,
@@ -275,7 +275,7 @@ impl PyExpr {
     pub fn rex_type(&self) -> PyResult<RexType> {
         Ok(match self.expr {
             Expr::Alias(..) => RexType::Alias,
-            Expr::Column(..) => RexType::Reference,
+            Expr::Column(..) | Expr::LambdaVariable(..) => RexType::Reference,
             Expr::ScalarVariable(..) | Expr::Literal(..) => RexType::Literal,
             Expr::BinaryExpr { .. }
             | Expr::Not(..)
@@ -304,7 +304,9 @@ impl PyExpr {
             | Expr::OuterReferenceColumn(_, _)
             | Expr::Unnest(_)
             | Expr::IsNotUnknown(_)
-            | Expr::SetComparison(_) => RexType::Call,
+            | Expr::SetComparison(_)
+            | Expr::HigherOrderFunction(_)
+            | Expr::Lambda(_) => RexType::Call,
             Expr::ScalarSubquery(..) => RexType::ScalarSubquery,
             #[allow(deprecated)]
             Expr::Wildcard { .. } => RexType::Call,
@@ -360,7 +362,8 @@ impl PyExpr {
                 params: AggregateFunctionParams { args, .. },
                 ..
             })
-            | Expr::ScalarFunction(ScalarFunction { args, .. }) => {
+            | Expr::ScalarFunction(ScalarFunction { args, .. })
+            | Expr::HigherOrderFunction(HigherOrderFunction { args, .. }) => {
                 Ok(args.iter().map(|arg| PyExpr::from(arg.clone())).collect())
             }
             Expr::WindowFunction(boxed_window_fn) => {
@@ -438,7 +441,9 @@ impl PyExpr {
             | Expr::ScalarSubquery(..)
             | Expr::Placeholder { .. }
             | Expr::Exists { .. }
-            | Expr::SetComparison(..) => Err(py_runtime_err(format!(
+            | Expr::SetComparison(..)
+            | Expr::Lambda(_)
+            | Expr::LambdaVariable(_) => Err(py_runtime_err(format!(
                 "Unimplemented Expr type: {}",
                 self.expr
             ))),
@@ -575,7 +580,9 @@ impl PyExpr {
                 | Operator::QuestionPipe
                 | Operator::Colon => Err(py_type_err(format!("Unsupported expr: ${op}"))),
             },
-            Expr::Cast(Cast { expr: _, data_type }) => DataTypeMap::map_from_arrow_type(data_type),
+            Expr::Cast(Cast { expr: _, field }) => {
+                DataTypeMap::map_from_arrow_type(field.data_type())
+            }
             Expr::Literal(scalar_value, _) => DataTypeMap::map_from_scalar_value(scalar_value),
             _ => Err(py_type_err(format!(
                 "Non Expr::Literal encountered in types: {expr:?}",

@@ -5,15 +5,14 @@ use crate::sql::logical::PyLogicalPlan;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::{plan_err, Result};
-use datafusion_expr::AggregateUDF;
+use datafusion_common::{plan_err, Result, TableReference};
 use datafusion_expr::WindowUDF;
 use datafusion_expr::{logical_plan::builder::LogicalTableSource, ScalarUDF, TableSource};
+use datafusion_expr::{AggregateUDF, HigherOrderUDF};
 use datafusion_sql::sqlparser::dialect::dialect_from_str;
 use datafusion_sql::{
     planner::{ContextProvider, SqlToRel},
     sqlparser::parser::Parser,
-    TableReference,
 };
 
 use pyo3::prelude::*;
@@ -77,6 +76,10 @@ impl ContextProvider for PyContextProvider {
         None
     }
 
+    fn get_higher_order_meta(&self, _name: &str) -> Option<Arc<HigherOrderUDF>> {
+        None
+    }
+
     fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
         None
     }
@@ -94,6 +97,10 @@ impl ContextProvider for PyContextProvider {
     }
 
     fn udf_names(&self) -> Vec<String> {
+        vec![]
+    }
+
+    fn higher_order_function_names(&self) -> Vec<String> {
         vec![]
     }
 

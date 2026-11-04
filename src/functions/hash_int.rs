@@ -3,7 +3,6 @@ use arrow::datatypes::DataType;
 use datafusion::logical_expr::{ColumnarValue, Signature, Volatility};
 use datafusion_common::exec_err;
 use datafusion_expr::{ScalarFunctionArgs, ScalarUDFImpl};
-use std::any::Any;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
@@ -27,10 +26,6 @@ impl HashIntFunc {
 }
 
 impl ScalarUDFImpl for HashIntFunc {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "hash_int"
     }
