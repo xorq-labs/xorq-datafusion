@@ -26,6 +26,21 @@ aws-credential-types = "=0.101.0"
 object_store = { version = "0.13.1", features = ["aws", "gcp", "http"] }
 url = "2.5.7"
 
+# Full DWARF is not needed for the Python test loop. Line tables keep file and
+# line numbers for this crate in panics and backtraces; dependencies carry no
+# debuginfo at all: the debug `.so` drops from ~950 MB to ~245 MB, `target/debug`
+# from ~4.6 GB to ~2.0 GB, and every link gets shorter. Override per invocation
+# when stepping through Rust in a debugger. Both keys are needed, since the
+# per-package override below wins over the profile-level setting for
+# dependencies:
+#   maturin develop --config 'profile.dev.debug=true' \
+#       --config 'profile.dev.package."*".debug=true'
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 2
