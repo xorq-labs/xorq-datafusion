@@ -27,8 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64, x86]
-        python-version: ["3.10", "3.11"]
+        # requires-python = ">=3.10": test the floor and the newest release.
+        # 32-bit wheels are still built and published by ci-release.
+        python-version: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -37,8 +38,6 @@ jobs:
       # Cargo.lock, and falls back to the newest cache on a miss.
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
       - uses: actions/setup-python@v5
         with:
@@ -58,7 +57,7 @@ jobs:
         with:
           command: 'develop'
           args: '--release --strip'
-          target: ${{ matrix.target }}
+          target: x86_64
           sccache: 'true'
           manylinux: 'auto'
 
