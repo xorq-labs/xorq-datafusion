@@ -14,7 +14,7 @@ use crate::py_record_batch_provider::PyRecordBatchProvider;
 use crate::udaf::PyAggregateUDF;
 use crate::udf::PyScalarUDF;
 use crate::udwf::PyWindowUDF;
-use crate::utils::wait_for_future;
+use crate::utils::{get_tokio_handle, wait_for_future};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -26,15 +26,19 @@ use datafusion::execution::context::{DataFilePaths, SessionConfig, SessionContex
 use datafusion::execution::options::ReadOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::execution::TaskContextProvider;
 use datafusion::prelude::{CsvReadOptions, DataFrame, ParquetReadOptions};
 use datafusion_common::config::ConfigFileType;
 use datafusion_common::{exec_err, ScalarValue, TableReference};
 use datafusion_expr::Expr;
 use datafusion_expr::ScalarUDF;
+use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
+use datafusion_ffi::table_provider::FFI_TableProvider;
+use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
 use object_store::{Error, GetOptions, ObjectMeta, ObjectStoreScheme};
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyCapsule, PyDict};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -185,7 +189,10 @@ impl PySessionState {
 #[pyclass(from_py_object, name = "SessionContext", module = "let", subclass)]
 #[derive(Clone)]
 pub(crate) struct PySessionContext {
-    pub(crate) ctx: SessionContext,
+    // Behind an `Arc` because the FFI logical extension codec handed to foreign
+    // table providers keeps only a `Weak` to the task context provider: the
+    // strong reference must live as long as this Python object does.
+    pub(crate) ctx: Arc<SessionContext>,
 }
 
 #[pymethods]
@@ -219,7 +226,7 @@ impl PySessionContext {
         // register the UDF with the context, so it can be invoked by name and from SQL
         ctx.register_udf(ScalarUDF::from(HashIntFunc::new()));
 
-        Ok(PySessionContext { ctx })
+        Ok(PySessionContext { ctx: Arc::new(ctx) })
     }
 
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.
@@ -441,7 +448,16 @@ impl PySessionContext {
         &self,
         name: &str,
         provider: &Bound<'_, PyAny>,
+        py: Python,
     ) -> PyResult<()> {
+        if provider.hasattr("__datafusion_table_provider__")? {
+            let table = self.import_ffi_table_provider(provider, py)?;
+            self.ctx
+                .register_table(name, table)
+                .map_err(from_datafusion_error)?;
+            return Ok(());
+        }
+
         let provider = PyTableProvider::new(provider)?;
         let table: Arc<dyn TableProvider> = Arc::new(provider);
 
@@ -467,6 +483,17 @@ impl PySessionContext {
             .register_table(name, table.table())
             .map_err(from_datafusion_error)?;
         Ok(())
+    }
+
+    /// Exposes this session's logical extension codec to FFI table providers,
+    /// following the datafusion-python protocol. The codec holds only a weak
+    /// reference to this context, so it must not outlive it.
+    pub fn __datafusion_logical_extension_codec__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let codec = self.ffi_logical_extension_codec();
+        PyCapsule::new_with_value(py, codec, c"datafusion_logical_extension_codec")
     }
 
     fn register_dataset(&self, name: &str, dataset: &Bound<'_, PyAny>, py: Python) -> PyResult<()> {
@@ -641,6 +668,54 @@ impl PySessionContext {
 }
 
 impl PySessionContext {
+    fn ffi_logical_extension_codec(&self) -> FFI_LogicalExtensionCodec {
+        let task_ctx_provider: Arc<dyn TaskContextProvider> = self.ctx.clone();
+        FFI_LogicalExtensionCodec::new(
+            Arc::new(DefaultLogicalExtensionCodec {}),
+            Some(get_tokio_handle()),
+            &task_ctx_provider,
+        )
+    }
+
+    /// Imports a table provider that implements the datafusion-python FFI
+    /// protocol (`__datafusion_table_provider__`).
+    fn import_ffi_table_provider(
+        &self,
+        provider: &Bound<'_, PyAny>,
+        py: Python,
+    ) -> PyResult<Arc<dyn TableProvider>> {
+        // Hand over the codec capsule rather than the session: the protocol
+        // accepts either, and the capsule needs no new Python object.
+        let codec = self.__datafusion_logical_extension_codec__(py)?;
+        let capsule = provider.call_method1("__datafusion_table_provider__", (codec,))?;
+        let capsule = capsule.cast::<PyCapsule>().map_err(|_| {
+            PyTypeError::new_err("__datafusion_table_provider__ must return a PyCapsule")
+        })?;
+        let ptr = capsule
+            .pointer_checked(Some(c"datafusion_table_provider"))
+            .map_err(|_| {
+                PyValueError::new_err(
+                    "__datafusion_table_provider__ must return a 'datafusion_table_provider' capsule",
+                )
+            })?;
+        // SAFETY: the capsule name was checked above, and by the datafusion-python
+        // protocol a capsule with that name holds an `FFI_TableProvider`. The
+        // conversion below clones the FFI struct while the capsule is alive, so
+        // the borrow does not outlive its owner.
+        let ffi = unsafe { ptr.cast::<FFI_TableProvider>().as_ref() };
+
+        // FFI structs are only ABI-compatible within one DataFusion major version.
+        let (ours, theirs) = (datafusion_ffi::version(), unsafe { (ffi.version)() });
+        if ours != theirs {
+            return Err(PyValueError::new_err(format!(
+                "table provider was built against DataFusion {theirs}, \
+                 but xorq-datafusion uses DataFusion {ours}"
+            )));
+        }
+
+        Ok(ffi.into())
+    }
+
     async fn _table(&self, name: &str) -> datafusion_common::Result<DataFrame> {
         self.ctx.table(name).await
     }
@@ -706,7 +781,7 @@ impl PySessionContext {
 
 impl From<PySessionContext> for SessionContext {
     fn from(ctx: PySessionContext) -> SessionContext {
-        ctx.ctx
+        Arc::unwrap_or_clone(ctx.ctx)
     }
 }
 
