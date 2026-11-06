@@ -1,12 +1,13 @@
 """Table providers loaded over the datafusion-python FFI protocol.
 
 The batchcorder tests are skipped unless the ``batchcorder_datafusion`` wheel
-is installed, e.g. with
-``maturin develop --uv -m ../multirecord/crates/batchcorder-datafusion-py/Cargo.toml``.
-FFI structs are only compatible within one DataFusion major version, so it
-must be built against the same DataFusion major as xorq-datafusion.
+is installed (``pip install batchcorder-datafusion``, or ``maturin develop`` of
+``crates/batchcorder-datafusion-py`` in the batchcorder repository). FFI structs
+are only compatible within one DataFusion major version, so it must be built
+against the same DataFusion major as xorq-datafusion.
 """
 
+import gc
 import subprocess
 import sys
 
@@ -27,6 +28,9 @@ requires_batchcorder = pytest.mark.skipif(
 
 N_ROWS = 1000
 CHUNK = 50
+SELF_JOIN = (
+    "select a.k, count(*) as c from t a join t b on a.k = b.k group by a.k order by a.k"
+)
 
 
 def _batches() -> list[pa.RecordBatch]:
@@ -47,8 +51,6 @@ def _provider(**kwargs):
 
 
 def _tee_ctx(provider) -> SessionContext:
-    # Keep the context alive until the query finishes: over FFI the provider
-    # only holds a weak reference to the host session.
     ctx = SessionContext()
     ctx.register_table_provider("t", provider)
     return ctx
@@ -126,11 +128,42 @@ def test_tee_provider_matches_reference_with_exact_fanout(sql, scans):
 def test_tee_provider_execute_stream():
     provider = _provider()
     ctx = _tee_ctx(provider)
-    sql = "select a.k, count(*) as c from t a join t b on a.k = b.k group by a.k order by a.k"
-    batches = [batch.to_pyarrow() for batch in ctx.sql(sql).execute_stream()]
+    batches = [batch.to_pyarrow() for batch in ctx.sql(SELF_JOIN).execute_stream()]
     result = pa.Table.from_batches(batches)
-    assert result.equals(_reference_result(sql))
+    assert result.equals(_reference_result(SELF_JOIN))
     assert provider.scans_executed == 2
+
+
+# The host's codec links to the SessionContext only weakly, and the FFI scan
+# resolves that link on every scan. batchcorder-datafusion swaps in a task
+# context provider of its own, so a query keeps working after the
+# SessionContext is gone, as it does for every other kind of table.
+@requires_batchcorder
+def test_tee_provider_survives_dropped_context():
+    provider = _provider()
+    ctx = _tee_ctx(provider)
+    df = ctx.sql(SELF_JOIN)
+    del ctx
+    gc.collect()
+    assert df.to_arrow_table().equals(_reference_result(SELF_JOIN))
+    assert provider.scans_executed == 2
+
+
+@requires_batchcorder
+def test_tee_provider_with_temporary_context():
+    df = _tee_ctx(_provider()).sql(SELF_JOIN)
+    gc.collect()
+    assert df.to_arrow_table().equals(_reference_result(SELF_JOIN))
+
+
+@requires_batchcorder
+def test_tee_provider_stream_survives_dropped_context():
+    ctx = _tee_ctx(_provider())
+    stream = ctx.sql(SELF_JOIN).execute_stream()
+    del ctx
+    gc.collect()
+    result = pa.Table.from_batches([batch.to_pyarrow() for batch in stream])
+    assert result.equals(_reference_result(SELF_JOIN))
 
 
 @requires_batchcorder
