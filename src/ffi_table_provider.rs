@@ -40,11 +40,11 @@ use tokio::runtime::Handle;
 
 /// Task context for codec calls made outside of a planning session.
 ///
-/// Once the `SessionContext` is gone, it serves the most recent task context
-/// it has seen: from the live context, or from the last session that planned
-/// a scan of this table. A UDF registered after that point is unknown to it,
-/// so a pushdown check on a filter using such a UDF can still fail; only the
-/// first query planned after the context is dropped is exposed to this.
+/// While the `SessionContext` is alive, it serves the context's current task
+/// context and remembers it. Once the context is gone, it serves the last one
+/// remembered: the registry as of the last pushdown check made while the
+/// context was alive (or as of registration, if there was none). A pushdown
+/// check on a filter using a UDF registered after that point fails to decode.
 struct HostTaskContext {
     session: Weak<SessionContext>,
     fallback: RwLock<Arc<TaskContext>>,
@@ -69,7 +69,7 @@ impl TaskContextProvider for HostTaskContext {
     }
 }
 
-/// Task context of the session planning a single scan.
+/// Task context of the session planning a single scan or insert.
 struct SessionTaskContext(Arc<TaskContext>);
 
 impl TaskContextProvider for SessionTaskContext {
@@ -84,7 +84,7 @@ pub struct HostedFfiTableProvider {
     /// The provider's own extension codec, kept when the codec is rebound.
     extension_codec: Arc<dyn LogicalExtensionCodec>,
     /// Strong owner of the provider the codec in `inner` points to weakly.
-    task_ctx: Arc<HostTaskContext>,
+    _task_ctx: Arc<HostTaskContext>,
     runtime: Option<Handle>,
 }
 
@@ -126,35 +126,31 @@ impl HostedFfiTableProvider {
         Self {
             inner,
             extension_codec,
-            task_ctx,
+            _task_ctx: task_ctx,
             runtime,
         }
     }
 
-    /// The provider with its codec bound to `task_ctx`. The caller must keep
-    /// `task_ctx` alive while the returned provider is in use. A provider that
-    /// turned out to be local to this library uses no codec and is returned as is.
-    fn bound_to(&self, task_ctx: &Arc<SessionTaskContext>) -> Arc<dyn TableProvider> {
+    /// The provider with its codec bound to `session`'s task context, and that
+    /// task context. The codec refers to it weakly, so the caller must keep the
+    /// returned task context alive while the provider is in use. A provider
+    /// that turned out to be local to this library uses no codec and is
+    /// returned as is.
+    fn bound_for(
+        &self,
+        session: &dyn Session,
+    ) -> (Arc<SessionTaskContext>, Arc<dyn TableProvider>) {
+        let task_ctx = Arc::new(SessionTaskContext(session.task_ctx()));
         let Some(foreign) = self.inner.downcast_ref::<ForeignTableProvider>() else {
-            return Arc::clone(&self.inner);
+            return (task_ctx, Arc::clone(&self.inner));
         };
         let mut ffi = foreign.0.clone();
         ffi.logical_codec = codec_for(
             Arc::clone(&self.extension_codec),
-            task_ctx,
+            &task_ctx,
             self.runtime.clone(),
         );
-        Arc::new(ForeignTableProvider(ffi))
-    }
-}
-
-impl HostedFfiTableProvider {
-    /// Task context of `session`, also kept as the fallback for later calls
-    /// that get no session.
-    fn session_task_ctx(&self, session: &dyn Session) -> Arc<SessionTaskContext> {
-        let task_ctx = session.task_ctx();
-        self.task_ctx.remember(&task_ctx);
-        Arc::new(SessionTaskContext(task_ctx))
+        (task_ctx, Arc::new(ForeignTableProvider(ffi)))
     }
 }
 
@@ -179,8 +175,7 @@ impl TableProvider for HostedFfiTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let task_ctx = self.session_task_ctx(session);
-        let provider = self.bound_to(&task_ctx);
+        let (_task_ctx, provider) = self.bound_for(session);
         provider.scan(session, projection, filters, limit).await
     }
 
@@ -197,8 +192,7 @@ impl TableProvider for HostedFfiTableProvider {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let task_ctx = self.session_task_ctx(session);
-        let provider = self.bound_to(&task_ctx);
+        let (_task_ctx, provider) = self.bound_for(session);
         provider.insert_into(session, input, insert_op).await
     }
 }
