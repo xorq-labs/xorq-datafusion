@@ -159,6 +159,7 @@ def test_register_multiple_paths(ctx, data_dir, tmp_path, fname, register):
     table = ctx.table("single")
     table_multiple_paths = ctx.table("multiple")
 
+    assert "multiple" in ctx.tables()
     assert table.schema() == table_multiple_paths.schema()
     assert table_multiple_paths.count() == 2 * table.count()
 
