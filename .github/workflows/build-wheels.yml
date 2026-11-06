@@ -12,8 +12,11 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        target: [x86_64, x86, aarch64]
+        # No i686: pyarrow ships no Linux i686 wheels, and manylinux2014_i686
+        # pulls libatomic from the EOL CentOS 7 vault, which flakes.
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,8 +38,10 @@ jobs:
   windows:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
-        target: [x64, x86]
+        # No x86 (win32): pyarrow ships no win32 wheels.
+        target: [x64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +63,7 @@ jobs:
   macos:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [x86_64, aarch64]
     steps:
