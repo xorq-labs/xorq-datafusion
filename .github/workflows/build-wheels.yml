@@ -13,7 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64, x86, aarch64]
+        # No i686: pyarrow ships no Linux i686 wheels, and manylinux2014_i686
+        # pulls libatomic from the EOL CentOS 7 vault, which flakes.
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
