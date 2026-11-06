@@ -851,9 +851,10 @@ fn runtime_handle() -> PyResult<tokio::runtime::Handle> {
 }
 
 /// Whether a `TypeError` message reports a call with the wrong number of
-/// positional arguments, as raised by CPython ("takes 1 positional argument
-/// but 2 were given") and by pyo3 ("takes 0 positional arguments but 1 was
-/// given").
+/// positional arguments, as raised by Python functions ("takes 1 positional
+/// argument but 2 were given"), pyo3 ("takes 0 positional arguments but 1 was
+/// given") and C/Cython `METH_NOARGS` methods ("takes no arguments (1 given)").
 fn is_arity_error(message: &str) -> bool {
-    message.contains("positional argument") && message.contains(" given")
+    (message.contains("positional argument") || message.contains("takes no arguments"))
+        && message.contains(" given")
 }

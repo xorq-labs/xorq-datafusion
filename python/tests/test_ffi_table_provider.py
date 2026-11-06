@@ -93,6 +93,16 @@ class _NoArgProvider:
         return object()
 
 
+class _NoArgNativeProvider:
+    # A C method taking no arguments (METH_NOARGS), like an old native provider.
+    __datafusion_table_provider__ = {}.copy
+
+
+def test_ffi_native_provider_without_session_argument_is_reported():
+    with pytest.raises(ImportError, match="must accept the SessionContext"):
+        SessionContext().register_table_provider("t", _NoArgNativeProvider())
+
+
 class _RaisesTypeError:
     def __datafusion_table_provider__(self, session):
         raise TypeError("raised by the provider")
