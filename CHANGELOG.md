@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-06
+### Details
+#### Added
+- Add release.sh for steps 1-6 of the release flow by @mesejo in [#52](https://github.com/xorq-labs/xorq-datafusion/pull/52)
+
+#### Changed
+- Pin lint Python to 3.12 instead of 3.12.9 by @mesejo in [#50](https://github.com/xorq-labs/xorq-datafusion/pull/50)
+- Project ibis batches in Rust and cache provider schemas by @mesejo in [#48](https://github.com/xorq-labs/xorq-datafusion/pull/48)
+- Back PyRecordBatchProvider with DataFusion's StreamingTable by @mesejo in [#49](https://github.com/xorq-labs/xorq-datafusion/pull/49)
+- Share one build cache between maturin and cargo, trim dev debuginfo by @mesejo in [#51](https://github.com/xorq-labs/xorq-datafusion/pull/51)
+- Faster local builds and CI by @mesejo in [#54](https://github.com/xorq-labs/xorq-datafusion/pull/54)
+- Upgrade DataFusion to 55 and load FFI table providers by @mesejo in [#53](https://github.com/xorq-labs/xorq-datafusion/pull/53)
+- Drop 32-bit wheels, let every wheel build finish by @mesejo in [#58](https://github.com/xorq-labs/xorq-datafusion/pull/58)
+
 ## [0.2.11] - 2026-07-31
 ### Details
 #### Fixed
