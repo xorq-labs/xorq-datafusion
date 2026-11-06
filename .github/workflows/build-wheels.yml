@@ -9,41 +9,74 @@ permissions:
   contents: read
 
 jobs:
-  # One matrix for every platform so that fail-fast cancels all remaining
-  # builds as soon as one fails; it only acts within a single matrix.
-  wheels:
-    name: wheel (${{ matrix.platform }}-${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
+  linux:
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: true
       matrix:
-        include:
-          # No Linux i686: pyarrow ships no Linux i686 wheels, and
-          # manylinux2014_i686 pulls libatomic from the EOL CentOS 7 vault,
-          # which flakes.
-          - { platform: ubuntu, os: ubuntu-latest, target: x86_64, manylinux: auto }
-          - { platform: ubuntu, os: ubuntu-latest, target: aarch64, manylinux: '2_28' }
-          - { platform: windows, os: windows-latest, target: x64, python-arch: x64 }
-          - { platform: windows, os: windows-latest, target: x86, python-arch: x86 }
-          - { platform: macos, os: macos-latest, target: x86_64 }
-          - { platform: macos, os: macos-latest, target: aarch64 }
+        # No i686: pyarrow ships no Linux i686 wheels, and manylinux2014_i686
+        # pulls libatomic from the EOL CentOS 7 vault, which flakes.
+        target: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          architecture: ${{ matrix.python-arch }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter
           sccache: 'true'
-          manylinux: ${{ matrix.manylinux }}
+          manylinux: ${{ matrix.target == 'aarch64' && '2_28' || 'auto' }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.platform }}-${{ matrix.target }}
+          name: wheel-ubuntu-${{ matrix.target }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          architecture: ${{ matrix.target }}
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-${{ matrix.target }}
+          path: dist
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-macos-${{ matrix.target }}
           path: dist
 
   sdist:
