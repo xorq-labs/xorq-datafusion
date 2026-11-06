@@ -25,7 +25,7 @@ use datafusion::functions::core::expr_ext::FieldAccessor;
 use datafusion::logical_expr::expr::AggregateFunctionParams;
 use datafusion_expr::{
     col,
-    expr::{AggregateFunction, HigherOrderFunction, InList, InSubquery, ScalarFunction},
+    expr::{AggregateFunction, HigherOrderFunction, InList, InSubquery, Lambda, ScalarFunction},
     lit,
     utils::exprlist_to_fields,
     Between, BinaryExpr, Case, Cast, Expr, Like, LogicalPlan, Operator, TryCast,
@@ -336,9 +336,12 @@ impl PyExpr {
     pub fn rex_call_operands(&self) -> PyResult<Vec<PyExpr>> {
         match &self.expr {
             // Expr variants that are themselves the operand to return
-            Expr::Column(..) | Expr::ScalarVariable(..) | Expr::Literal(..) => {
-                Ok(vec![PyExpr::from(self.expr.clone())])
-            }
+            Expr::Column(..)
+            | Expr::ScalarVariable(..)
+            | Expr::Literal(..)
+            | Expr::LambdaVariable(..) => Ok(vec![PyExpr::from(self.expr.clone())]),
+
+            Expr::Lambda(Lambda { body, .. }) => Ok(vec![PyExpr::from(*body.clone())]),
 
             Expr::Alias(alias) => Ok(vec![PyExpr::from(*alias.expr.clone())]),
 
@@ -441,9 +444,7 @@ impl PyExpr {
             | Expr::ScalarSubquery(..)
             | Expr::Placeholder { .. }
             | Expr::Exists { .. }
-            | Expr::SetComparison(..)
-            | Expr::Lambda(_)
-            | Expr::LambdaVariable(_) => Err(py_runtime_err(format!(
+            | Expr::SetComparison(..) => Err(py_runtime_err(format!(
                 "Unimplemented Expr type: {}",
                 self.expr
             ))),
@@ -459,6 +460,10 @@ impl PyExpr {
                 right: _,
             }) => format!("{op}"),
             Expr::ScalarFunction(ScalarFunction { func, args: _ }) => func.name().to_string(),
+            Expr::HigherOrderFunction(HigherOrderFunction { func, args: _ }) => {
+                func.name().to_string()
+            }
+            Expr::Lambda(..) => "lambda".to_string(),
             Expr::Cast { .. } => "cast".to_string(),
             Expr::Between { .. } => "between".to_string(),
             Expr::Case { .. } => "case".to_string(),
@@ -523,6 +528,11 @@ impl PyExpr {
                 // Since * could be any of the valid column names just return the first one
                 Ok(input_plan.schema().field(0).clone())
             }
+            // A lambda parameter is bound by its lambda, not by the input plan's
+            // schema, so it cannot be resolved against `input_plan`.
+            Expr::LambdaVariable(var) => var.field.clone().ok_or_else(|| {
+                DataFusionError::Common(format!("Lambda variable {} has no field", var.name))
+            }),
             _ => {
                 let fields = exprlist_to_fields(std::slice::from_ref(expr), input_plan)?;
                 Ok(fields[0].1.clone())
