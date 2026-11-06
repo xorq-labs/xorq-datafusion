@@ -362,7 +362,7 @@ impl PyDataFrame {
                 .map(|o| o.into_bound_py_any(py))?
         }?;
 
-        let batches = self.collect(py)?.into_pyobject(py)?;
+        let batches = batches.into_pyobject(py)?;
 
         // Instantiate pyarrow Table object and use it's from_batches method
         let table_class = py.import("pyarrow")?.getattr("Table")?;

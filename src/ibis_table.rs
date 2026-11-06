@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
@@ -62,10 +61,6 @@ impl IbisTable {
 
 #[async_trait]
 impl TableProvider for IbisTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

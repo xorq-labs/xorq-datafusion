@@ -564,13 +564,17 @@ fn get_runtime() -> &'static RwLock<Option<Runtime>> {
 
 /// Returns a Handle for spawning tasks without blocking on the runtime lock.
 pub fn get_tokio_handle() -> Handle {
+    try_get_tokio_handle().expect("tokio runtime has been shut down")
+}
+
+/// Like [`get_tokio_handle`], but returns `None` after [`shutdown_runtime`]
+/// instead of panicking.
+pub fn try_get_tokio_handle() -> Option<Handle> {
     get_runtime()
         .read()
         .unwrap()
         .as_ref()
-        .expect("tokio runtime has been shut down")
-        .handle()
-        .clone()
+        .map(|rt| rt.handle().clone())
 }
 
 /// Shuts down the process-wide tokio runtime. Safe to call from Python before

@@ -3,6 +3,7 @@ use crate::dataframe::PyDataFrame;
 use crate::dataset::Dataset;
 use crate::errors::from_datafusion_error;
 use crate::expr::sort_expr::PySortExpr;
+use crate::ffi_table_provider::{codec_for, HostedFfiTableProvider};
 use crate::functions::hash_int::HashIntFunc;
 use crate::ibis_table::IbisTable;
 use crate::object_storage::{
@@ -14,7 +15,7 @@ use crate::py_record_batch_provider::PyRecordBatchProvider;
 use crate::udaf::PyAggregateUDF;
 use crate::udf::PyScalarUDF;
 use crate::udwf::PyWindowUDF;
-use crate::utils::wait_for_future;
+use crate::utils::{try_get_tokio_handle, wait_for_future};
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -31,10 +32,13 @@ use datafusion_common::config::ConfigFileType;
 use datafusion_common::{exec_err, ScalarValue, TableReference};
 use datafusion_expr::Expr;
 use datafusion_expr::ScalarUDF;
+use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
+use datafusion_ffi::table_provider::FFI_TableProvider;
+use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
 use object_store::{Error, GetOptions, ObjectMeta, ObjectStoreScheme};
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyImportError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyCapsule, PyDict};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -185,7 +189,10 @@ impl PySessionState {
 #[pyclass(from_py_object, name = "SessionContext", module = "let", subclass)]
 #[derive(Clone)]
 pub(crate) struct PySessionContext {
-    pub(crate) ctx: SessionContext,
+    // Behind an `Arc` because the FFI logical extension codec handed to foreign
+    // table providers keeps only a `Weak` to the task context provider: the
+    // strong reference must live as long as this Python object does.
+    pub(crate) ctx: Arc<SessionContext>,
 }
 
 #[pymethods]
@@ -219,7 +226,7 @@ impl PySessionContext {
         // register the UDF with the context, so it can be invoked by name and from SQL
         ctx.register_udf(ScalarUDF::from(HashIntFunc::new()));
 
-        Ok(PySessionContext { ctx })
+        Ok(PySessionContext { ctx: Arc::new(ctx) })
     }
 
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.
@@ -438,14 +445,18 @@ impl PySessionContext {
 
     #[pyo3(name = "register_table_provider")]
     pub fn register_py_table_provider(
-        &self,
+        slf: &Bound<'_, Self>,
         name: &str,
         provider: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let provider = PyTableProvider::new(provider)?;
-        let table: Arc<dyn TableProvider> = Arc::new(provider);
+        let this = slf.borrow();
+        let table: Arc<dyn TableProvider> = if provider.hasattr("__datafusion_table_provider__")? {
+            this.import_ffi_table_provider(slf.as_any(), provider)?
+        } else {
+            Arc::new(PyTableProvider::new(provider)?)
+        };
 
-        self.ctx
+        this.ctx
             .register_table(name, table)
             .map_err(from_datafusion_error)?;
 
@@ -467,6 +478,17 @@ impl PySessionContext {
             .register_table(name, table.table())
             .map_err(from_datafusion_error)?;
         Ok(())
+    }
+
+    /// Exposes this session's logical extension codec to FFI table providers,
+    /// following the datafusion-python protocol. The codec holds only a weak
+    /// reference to this context, so it must not outlive it.
+    pub fn __datafusion_logical_extension_codec__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyCapsule>> {
+        let codec = self.ffi_logical_extension_codec()?;
+        PyCapsule::new_with_value(py, codec, c"datafusion_logical_extension_codec")
     }
 
     fn register_dataset(&self, name: &str, dataset: &Bound<'_, PyAny>, py: Python) -> PyResult<()> {
@@ -641,6 +663,85 @@ impl PySessionContext {
 }
 
 impl PySessionContext {
+    fn ffi_logical_extension_codec(&self) -> PyResult<FFI_LogicalExtensionCodec> {
+        Ok(codec_for(
+            Arc::new(DefaultLogicalExtensionCodec {}),
+            &self.ctx,
+            Some(runtime_handle()?),
+        ))
+    }
+
+    /// Imports a table provider that implements the datafusion-python FFI
+    /// protocol (`__datafusion_table_provider__`).
+    ///
+    /// `session` is the Python object for `self`; providers may treat it as a
+    /// session, for example to ask it for `__datafusion_logical_extension_codec__`.
+    fn import_ffi_table_provider(
+        &self,
+        session: &Bound<'_, PyAny>,
+        provider: &Bound<'_, PyAny>,
+    ) -> PyResult<Arc<dyn TableProvider>> {
+        let runtime = runtime_handle()?;
+        let py = provider.py();
+        let capsule = provider
+            .call_method1("__datafusion_table_provider__", (session,))
+            .map_err(|err| {
+                // Only an arity mismatch on the call itself means the provider
+                // predates the session argument. Such an error is raised before
+                // the method's frame exists, so it has no traceback; one raised
+                // in a Python method body has one. Native (pyo3) providers raise
+                // without a traceback too, hence the message check as well.
+                if err.is_instance_of::<PyTypeError>(py)
+                    && err.traceback(py).is_none()
+                    && is_arity_error(&err.to_string())
+                {
+                    let import_err = PyImportError::new_err(format!(
+                        "Incompatible libraries. `__datafusion_table_provider__` must accept \
+                         the SessionContext it is being installed on. Upgrade the library \
+                         providing this table. ({err})"
+                    ));
+                    import_err.set_cause(py, Some(err));
+                    import_err
+                } else {
+                    err
+                }
+            })?;
+        let capsule = capsule.cast::<PyCapsule>().map_err(|_| {
+            PyTypeError::new_err("__datafusion_table_provider__ must return a PyCapsule")
+        })?;
+        let ptr = capsule
+            .pointer_checked(Some(c"datafusion_table_provider"))
+            .map_err(|_| {
+                PyValueError::new_err(
+                    "__datafusion_table_provider__ must return a 'datafusion_table_provider' capsule",
+                )
+            })?;
+        // SAFETY: the capsule name was checked above, and by the datafusion-python
+        // protocol a capsule with that name holds an `FFI_TableProvider`. The
+        // conversion below clones the FFI struct while the capsule is alive, so
+        // the borrow does not outlive its owner.
+        let ffi = unsafe { ptr.cast::<FFI_TableProvider>().as_ref() };
+
+        // FFI structs are only ABI-compatible within one DataFusion major version.
+        // This check is a diagnostic, not a guarantee: `version` is not the first
+        // field, so reading it already assumes our layout. Upstream offers no
+        // layout-independent marker; this catches the common case of a library
+        // built against a nearby major whose fields up to `version` still line up.
+        let (ours, theirs) = (datafusion_ffi::version(), unsafe { (ffi.version)() });
+        if ours != theirs {
+            return Err(PyValueError::new_err(format!(
+                "table provider was built against DataFusion {theirs}, \
+                 but xorq-datafusion uses DataFusion {ours}"
+            )));
+        }
+
+        Ok(Arc::new(HostedFfiTableProvider::new(
+            ffi,
+            &self.ctx,
+            Some(runtime),
+        )))
+    }
+
     async fn _table(&self, name: &str) -> datafusion_common::Result<DataFrame> {
         self.ctx.table(name).await
     }
@@ -704,12 +805,6 @@ impl PySessionContext {
     }
 }
 
-impl From<PySessionContext> for SessionContext {
-    fn from(ctx: PySessionContext) -> SessionContext {
-        ctx.ctx
-    }
-}
-
 fn convert_table_partition_cols(
     table_partition_cols: Vec<(String, String)>,
 ) -> Result<Vec<(String, DataType)>, PyErr> {
@@ -748,4 +843,18 @@ fn metadata_to_pydict(py: Python, metadata: ObjectMeta) -> PyResult<Py<PyDict>> 
     }
 
     Ok(dict.into())
+}
+
+fn runtime_handle() -> PyResult<tokio::runtime::Handle> {
+    try_get_tokio_handle()
+        .ok_or_else(|| PyRuntimeError::new_err("tokio runtime has been shut down"))
+}
+
+/// Whether a `TypeError` message reports a call with the wrong number of
+/// positional arguments, as raised by Python functions ("takes 1 positional
+/// argument but 2 were given"), pyo3 ("takes 0 positional arguments but 1 was
+/// given") and C/Cython `METH_NOARGS` methods ("takes no arguments (1 given)").
+fn is_arity_error(message: &str) -> bool {
+    (message.contains("positional argument") || message.contains("takes no arguments"))
+        && message.contains(" given")
 }

@@ -1,3 +1,4 @@
+import shutil
 from abc import ABCMeta, abstractmethod
 
 import ibis
@@ -142,40 +143,38 @@ def test_register_table_provider_reads_schema_once(ctx, data_dir):
     assert provider.schema_calls == 1
 
 
-def test_register_csv_multiple_paths(ctx, data_dir):
-    fname = "iris.csv"
-    table_name = "iris"
-    iris_path = str(data_dir / fname)
-    ctx.register_csv(table_name, [iris_path])
-    ctx.register_csv(
-        f"{table_name}_multiple_paths",
-        [
-            iris_path,
-            iris_path,
-        ],
-    )
-    table = ctx.table(table_name)
-    table_multiple_paths = ctx.table(f"{table_name}_multiple_paths")
+@pytest.mark.parametrize(
+    ("fname", "register"),
+    [
+        ("iris.csv", "register_csv"),
+        ("batting.parquet", "register_parquet"),
+    ],
+)
+def test_register_multiple_paths(ctx, data_dir, tmp_path, fname, register):
+    path = data_dir / fname
+    copy = tmp_path / fname
+    shutil.copyfile(path, copy)
+    getattr(ctx, register)("single", [str(path)])
+    getattr(ctx, register)("multiple", [str(path), str(copy)])
+    table = ctx.table("single")
+    table_multiple_paths = ctx.table("multiple")
 
-    assert any(f"{table_name}_multiple_paths" in t for t in ctx.tables())
+    assert "multiple" in ctx.tables()
     assert table.schema() == table_multiple_paths.schema()
     assert table_multiple_paths.count() == 2 * table.count()
 
 
-def test_register_parquet_multiple_paths(ctx, data_dir):
-    fname = "batting.parquet"
-    table_name = "batting"
-    batting_path = str(data_dir / fname)
-    ctx.register_parquet(table_name, [batting_path])
-    ctx.register_parquet(
-        f"{table_name}_multiple_paths",
-        [
-            batting_path,
-            batting_path,
-        ],
-    )
-    table = ctx.table(table_name)
-    table_multiple_paths = ctx.table(f"{table_name}_multiple_paths")
+@pytest.mark.parametrize(
+    ("fname", "register"),
+    [
+        ("iris.csv", "register_csv"),
+        ("batting.parquet", "register_parquet"),
+    ],
+)
+def test_register_repeated_path_reads_file_once(ctx, data_dir, fname, register):
+    # DataFusion >= 55 dedupes overlapping table paths within one ListingTable.
+    path = str(data_dir / fname)
+    getattr(ctx, register)("single", [path])
+    getattr(ctx, register)("repeated", [path, path])
 
-    assert any(f"{table_name}_multiple_paths" in t for t in ctx.tables())
-    assert table_multiple_paths.count() == 2 * table.count()
+    assert ctx.table("repeated").count() == ctx.table("single").count()

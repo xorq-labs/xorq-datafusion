@@ -10,6 +10,7 @@ mod dataset;
 mod dataset_exec;
 mod errors;
 pub mod expr;
+mod ffi_table_provider;
 mod functions;
 mod ibis_filter_expression;
 mod ibis_table;

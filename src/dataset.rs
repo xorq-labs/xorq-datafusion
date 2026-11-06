@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -71,10 +70,6 @@ impl Dataset {
 
 #[async_trait]
 impl TableProvider for Dataset {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
