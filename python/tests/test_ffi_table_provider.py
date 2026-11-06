@@ -76,7 +76,26 @@ class _NotACapsule:
 class _WrongCapsule:
     def __datafusion_table_provider__(self, session):
         # Any capsule with a different name must be rejected.
-        return session
+        return session.__datafusion_logical_extension_codec__()
+
+
+class _RecordsSession:
+    def __init__(self):
+        self.session = None
+
+    def __datafusion_table_provider__(self, session):
+        self.session = session
+        return object()
+
+
+class _NoArgProvider:
+    def __datafusion_table_provider__(self):
+        return object()
+
+
+class _RaisesTypeError:
+    def __datafusion_table_provider__(self, session):
+        raise TypeError("raised by the provider")
 
 
 def test_ffi_provider_must_return_capsule():
@@ -87,6 +106,51 @@ def test_ffi_provider_must_return_capsule():
 def test_ffi_provider_capsule_name_is_checked():
     with pytest.raises(ValueError, match="datafusion_table_provider"):
         SessionContext().register_table_provider("t", _WrongCapsule())
+
+
+def test_ffi_provider_receives_the_session():
+    ctx = SessionContext()
+    provider = _RecordsSession()
+    with pytest.raises(TypeError, match="must return a PyCapsule"):
+        ctx.register_table_provider("t", provider)
+    assert provider.session is ctx
+
+
+def test_ffi_provider_without_session_argument_is_reported():
+    with pytest.raises(ImportError, match="must accept the SessionContext") as exc:
+        SessionContext().register_table_provider("t", _NoArgProvider())
+    assert isinstance(exc.value.__cause__, TypeError)
+
+
+def test_ffi_provider_type_error_is_not_rewritten():
+    with pytest.raises(TypeError, match="raised by the provider"):
+        SessionContext().register_table_provider("t", _RaisesTypeError())
+
+
+_SHUTDOWN_SCRIPT = """
+from xorq_datafusion import SessionContext
+from xorq_datafusion._internal import runtime
+
+ctx = SessionContext()
+runtime.shutdown(None)
+try:
+    ctx.__datafusion_logical_extension_codec__()
+except RuntimeError as e:
+    assert "shut down" in str(e), e
+    print("ok")
+"""
+
+
+def test_codec_after_runtime_shutdown_raises_runtime_error():
+    proc = subprocess.run(
+        [sys.executable, "-c", _SHUTDOWN_SCRIPT],
+        timeout=60,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ok"
 
 
 QUERIES = [
@@ -225,3 +289,18 @@ def test_tee_provider_python_upstream_concurrent_scans_do_not_deadlock():
         pytest.fail("deadlock: concurrent scans over a Python upstream hung")
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "ok"
+
+
+# datafusion-python's FFI example binds the host's codec as-is, unlike
+# batchcorder, so it exercises the host keeping that codec's task context alive.
+# Build it from datafusion-python's examples/datafusion-ffi-example.
+@pytest.mark.parametrize("drop_ctx", [False, True])
+def test_ffi_example_provider_survives_dropped_context(drop_ctx):
+    ffi_example = pytest.importorskip("datafusion_ffi_example")
+    ctx = SessionContext()
+    ctx.register_table_provider("t", ffi_example.MyTableProvider(3, 2, 4))
+    df = ctx.sql('select count(*) as c from t where "A" > 0')
+    if drop_ctx:
+        del ctx
+        gc.collect()
+    assert df.to_pydict() == {"c": [13]}
