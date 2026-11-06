@@ -119,7 +119,19 @@ def test_ffi_provider_receives_the_session():
 def test_ffi_provider_without_session_argument_is_reported():
     with pytest.raises(ImportError, match="must accept the SessionContext") as exc:
         SessionContext().register_table_provider("t", _NoArgProvider())
+    assert "positional argument" in str(exc.value)
     assert isinstance(exc.value.__cause__, TypeError)
+
+
+class _NativeTypeError:
+    # A builtin raises from native code, so its TypeError carries no Python
+    # traceback, like one raised inside a pyo3 provider.
+    __datafusion_table_provider__ = staticmethod(len)
+
+
+def test_ffi_provider_native_type_error_is_not_rewritten():
+    with pytest.raises(TypeError, match="has no len"):
+        SessionContext().register_table_provider("t", _NativeTypeError())
 
 
 def test_ffi_provider_type_error_is_not_rewritten():

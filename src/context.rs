@@ -688,15 +688,16 @@ impl PySessionContext {
         let capsule = provider
             .call_method1("__datafusion_table_provider__", (session,))
             .map_err(|err| {
-                // An arity mismatch is raised by the call machinery before the
-                // method's frame exists, so it carries no traceback; a TypeError
-                // raised inside a correctly-signed method does.
-                if err.is_instance_of::<PyTypeError>(py) && err.traceback(py).is_none() {
-                    let import_err = PyImportError::new_err(
+                // Only an arity mismatch means the provider predates the session
+                // argument. Match on the message rather than the missing
+                // traceback: errors raised inside native (pyo3) providers carry
+                // no traceback either, and must reach the user unchanged.
+                if err.is_instance_of::<PyTypeError>(py) && is_arity_error(&err.to_string()) {
+                    let import_err = PyImportError::new_err(format!(
                         "Incompatible libraries. `__datafusion_table_provider__` must accept \
                          the SessionContext it is being installed on. Upgrade the library \
-                         providing this table.",
-                    );
+                         providing this table. ({err})"
+                    ));
                     import_err.set_cause(py, Some(err));
                     import_err
                 } else {
@@ -845,4 +846,12 @@ fn metadata_to_pydict(py: Python, metadata: ObjectMeta) -> PyResult<Py<PyDict>> 
 fn runtime_handle() -> PyResult<tokio::runtime::Handle> {
     try_get_tokio_handle()
         .ok_or_else(|| PyRuntimeError::new_err("tokio runtime has been shut down"))
+}
+
+/// Whether a `TypeError` message reports a call with the wrong number of
+/// positional arguments, as raised by CPython ("takes 1 positional argument
+/// but 2 were given") and by pyo3 ("takes 0 positional arguments but 1 was
+/// given").
+fn is_arity_error(message: &str) -> bool {
+    message.contains("positional argument") && message.contains(" given")
 }

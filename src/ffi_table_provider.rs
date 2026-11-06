@@ -20,7 +20,7 @@
 //!   at registration afterwards.
 
 use std::fmt;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
@@ -39,16 +39,32 @@ use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
 use tokio::runtime::Handle;
 
 /// Task context for codec calls made outside of a planning session.
+///
+/// Once the `SessionContext` is gone, it serves the most recent task context
+/// it has seen: from the live context, or from the last session that planned
+/// a scan of this table. A UDF registered after that point is unknown to it,
+/// so a pushdown check on a filter using such a UDF can still fail; only the
+/// first query planned after the context is dropped is exposed to this.
 struct HostTaskContext {
     session: Weak<SessionContext>,
-    fallback: Arc<TaskContext>,
+    fallback: RwLock<Arc<TaskContext>>,
+}
+
+impl HostTaskContext {
+    fn remember(&self, task_ctx: &Arc<TaskContext>) {
+        *self.fallback.write().unwrap_or_else(|e| e.into_inner()) = Arc::clone(task_ctx);
+    }
 }
 
 impl TaskContextProvider for HostTaskContext {
     fn task_ctx(&self) -> Arc<TaskContext> {
         match self.session.upgrade() {
-            Some(ctx) => ctx.task_ctx(),
-            None => Arc::clone(&self.fallback),
+            Some(ctx) => {
+                let task_ctx = ctx.task_ctx();
+                self.remember(&task_ctx);
+                task_ctx
+            }
+            None => Arc::clone(&self.fallback.read().unwrap_or_else(|e| e.into_inner())),
         }
     }
 }
@@ -67,7 +83,7 @@ pub struct HostedFfiTableProvider {
     ffi: FFI_TableProvider,
     inner: Arc<dyn TableProvider>,
     /// Strong owner of the provider the codec in `ffi` points to weakly.
-    _task_ctx: Arc<HostTaskContext>,
+    task_ctx: Arc<HostTaskContext>,
     runtime: Option<Handle>,
 }
 
@@ -101,7 +117,7 @@ impl HostedFfiTableProvider {
     ) -> Self {
         let task_ctx = Arc::new(HostTaskContext {
             session: Arc::downgrade(ctx),
-            fallback: ctx.task_ctx(),
+            fallback: RwLock::new(ctx.task_ctx()),
         });
         let mut ffi = ffi.clone();
         ffi.logical_codec = codec_for(&task_ctx, runtime.clone());
@@ -109,7 +125,7 @@ impl HostedFfiTableProvider {
         Self {
             ffi,
             inner,
-            _task_ctx: task_ctx,
+            task_ctx,
             runtime,
         }
     }
@@ -123,8 +139,14 @@ impl HostedFfiTableProvider {
     }
 }
 
-fn session_task_ctx(session: &dyn Session) -> Arc<SessionTaskContext> {
-    Arc::new(SessionTaskContext(session.task_ctx()))
+impl HostedFfiTableProvider {
+    /// Task context of `session`, also kept as the fallback for later calls
+    /// that get no session.
+    fn session_task_ctx(&self, session: &dyn Session) -> Arc<SessionTaskContext> {
+        let task_ctx = session.task_ctx();
+        self.task_ctx.remember(&task_ctx);
+        Arc::new(SessionTaskContext(task_ctx))
+    }
 }
 
 #[async_trait]
@@ -148,7 +170,7 @@ impl TableProvider for HostedFfiTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let task_ctx = session_task_ctx(session);
+        let task_ctx = self.session_task_ctx(session);
         let provider = self.bound_to(&task_ctx);
         provider.scan(session, projection, filters, limit).await
     }
@@ -166,7 +188,7 @@ impl TableProvider for HostedFfiTableProvider {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let task_ctx = session_task_ctx(session);
+        let task_ctx = self.session_task_ctx(session);
         let provider = self.bound_to(&task_ctx);
         provider.insert_into(session, input, insert_op).await
     }
