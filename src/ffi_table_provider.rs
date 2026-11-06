@@ -34,8 +34,8 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::Statistics;
 use datafusion_expr::{Expr, TableProviderFilterPushDown};
 use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
-use datafusion_ffi::table_provider::FFI_TableProvider;
-use datafusion_proto::logical_plan::DefaultLogicalExtensionCodec;
+use datafusion_ffi::table_provider::{FFI_TableProvider, ForeignTableProvider};
+use datafusion_proto::logical_plan::LogicalExtensionCodec;
 use tokio::runtime::Handle;
 
 /// Task context for codec calls made outside of a planning session.
@@ -79,10 +79,11 @@ impl TaskContextProvider for SessionTaskContext {
 }
 
 pub struct HostedFfiTableProvider {
-    /// The foreign provider, with its codec bound to `task_ctx`.
-    ffi: FFI_TableProvider,
+    /// The imported provider, with its codec bound to `task_ctx`.
     inner: Arc<dyn TableProvider>,
-    /// Strong owner of the provider the codec in `ffi` points to weakly.
+    /// The provider's own extension codec, kept when the codec is rebound.
+    extension_codec: Arc<dyn LogicalExtensionCodec>,
+    /// Strong owner of the provider the codec in `inner` points to weakly.
     task_ctx: Arc<HostTaskContext>,
     runtime: Option<Handle>,
 }
@@ -90,23 +91,22 @@ pub struct HostedFfiTableProvider {
 impl fmt::Debug for HostedFfiTableProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostedFfiTableProvider")
-            .field("ffi", &self.ffi)
+            .field("inner", &self.inner)
             .finish_non_exhaustive()
     }
 }
 
-/// The returned codec refers to `task_ctx` weakly: it shares the allocation,
+/// Wraps `codec` for FFI with `task_ctx` as its task context provider. A codec
+/// that is itself foreign is re-exported as-is, with only the task context
+/// swapped. The result refers to `task_ctx` weakly: it shares the allocation,
 /// so it stays valid exactly as long as some clone of `task_ctx` is alive.
-fn codec_for<T: TaskContextProvider + 'static>(
+pub(crate) fn codec_for<T: TaskContextProvider + 'static>(
+    codec: Arc<dyn LogicalExtensionCodec>,
     task_ctx: &Arc<T>,
     runtime: Option<Handle>,
 ) -> FFI_LogicalExtensionCodec {
     let task_ctx: Arc<dyn TaskContextProvider> = Arc::clone(task_ctx) as _;
-    FFI_LogicalExtensionCodec::new(
-        Arc::new(DefaultLogicalExtensionCodec {}),
-        runtime,
-        &task_ctx,
-    )
+    FFI_LogicalExtensionCodec::new(codec, runtime, &task_ctx)
 }
 
 impl HostedFfiTableProvider {
@@ -119,23 +119,32 @@ impl HostedFfiTableProvider {
             session: Arc::downgrade(ctx),
             fallback: RwLock::new(ctx.task_ctx()),
         });
+        let extension_codec: Arc<dyn LogicalExtensionCodec> = (&ffi.logical_codec).into();
         let mut ffi = ffi.clone();
-        ffi.logical_codec = codec_for(&task_ctx, runtime.clone());
+        ffi.logical_codec = codec_for(Arc::clone(&extension_codec), &task_ctx, runtime.clone());
         let inner: Arc<dyn TableProvider> = (&ffi).into();
         Self {
-            ffi,
             inner,
+            extension_codec,
             task_ctx,
             runtime,
         }
     }
 
-    /// The foreign provider with its codec bound to `task_ctx`. The caller
-    /// must keep `task_ctx` alive while the returned provider is in use.
+    /// The provider with its codec bound to `task_ctx`. The caller must keep
+    /// `task_ctx` alive while the returned provider is in use. A provider that
+    /// turned out to be local to this library uses no codec and is returned as is.
     fn bound_to(&self, task_ctx: &Arc<SessionTaskContext>) -> Arc<dyn TableProvider> {
-        let mut ffi = self.ffi.clone();
-        ffi.logical_codec = codec_for(task_ctx, self.runtime.clone());
-        (&ffi).into()
+        let Some(foreign) = self.inner.downcast_ref::<ForeignTableProvider>() else {
+            return Arc::clone(&self.inner);
+        };
+        let mut ffi = foreign.0.clone();
+        ffi.logical_codec = codec_for(
+            Arc::clone(&self.extension_codec),
+            task_ctx,
+            self.runtime.clone(),
+        );
+        Arc::new(ForeignTableProvider(ffi))
     }
 }
 

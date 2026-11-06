@@ -134,6 +134,19 @@ def test_ffi_provider_native_type_error_is_not_rewritten():
         SessionContext().register_table_provider("t", _NativeTypeError())
 
 
+class _ArityErrorInBody:
+    def __datafusion_table_provider__(self, session):
+        def helper(x):
+            return x
+
+        return helper(session, session)
+
+
+def test_ffi_provider_arity_error_in_body_is_not_rewritten():
+    with pytest.raises(TypeError, match="helper"):
+        SessionContext().register_table_provider("t", _ArityErrorInBody())
+
+
 def test_ffi_provider_type_error_is_not_rewritten():
     with pytest.raises(TypeError, match="raised by the provider"):
         SessionContext().register_table_provider("t", _RaisesTypeError())

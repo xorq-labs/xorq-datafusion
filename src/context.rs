@@ -3,7 +3,7 @@ use crate::dataframe::PyDataFrame;
 use crate::dataset::Dataset;
 use crate::errors::from_datafusion_error;
 use crate::expr::sort_expr::PySortExpr;
-use crate::ffi_table_provider::HostedFfiTableProvider;
+use crate::ffi_table_provider::{codec_for, HostedFfiTableProvider};
 use crate::functions::hash_int::HashIntFunc;
 use crate::ibis_table::IbisTable;
 use crate::object_storage::{
@@ -27,7 +27,6 @@ use datafusion::execution::context::{DataFilePaths, SessionConfig, SessionContex
 use datafusion::execution::options::ReadOptions;
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::execution::TaskContextProvider;
 use datafusion::prelude::{CsvReadOptions, DataFrame, ParquetReadOptions};
 use datafusion_common::config::ConfigFileType;
 use datafusion_common::{exec_err, ScalarValue, TableReference};
@@ -665,11 +664,10 @@ impl PySessionContext {
 
 impl PySessionContext {
     fn ffi_logical_extension_codec(&self) -> PyResult<FFI_LogicalExtensionCodec> {
-        let task_ctx_provider: Arc<dyn TaskContextProvider> = self.ctx.clone();
-        Ok(FFI_LogicalExtensionCodec::new(
+        Ok(codec_for(
             Arc::new(DefaultLogicalExtensionCodec {}),
+            &self.ctx,
             Some(runtime_handle()?),
-            &task_ctx_provider,
         ))
     }
 
@@ -688,11 +686,15 @@ impl PySessionContext {
         let capsule = provider
             .call_method1("__datafusion_table_provider__", (session,))
             .map_err(|err| {
-                // Only an arity mismatch means the provider predates the session
-                // argument. Match on the message rather than the missing
-                // traceback: errors raised inside native (pyo3) providers carry
-                // no traceback either, and must reach the user unchanged.
-                if err.is_instance_of::<PyTypeError>(py) && is_arity_error(&err.to_string()) {
+                // Only an arity mismatch on the call itself means the provider
+                // predates the session argument. Such an error is raised before
+                // the method's frame exists, so it has no traceback; one raised
+                // in a Python method body has one. Native (pyo3) providers raise
+                // without a traceback too, hence the message check as well.
+                if err.is_instance_of::<PyTypeError>(py)
+                    && err.traceback(py).is_none()
+                    && is_arity_error(&err.to_string())
+                {
                     let import_err = PyImportError::new_err(format!(
                         "Incompatible libraries. `__datafusion_table_provider__` must accept \
                          the SessionContext it is being installed on. Upgrade the library \
