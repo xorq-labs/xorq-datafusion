@@ -8,13 +8,18 @@ objects and a DataFrame's schema, exchange JSON specs with the native layer
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
+from xorq_datafusion._internal import ml as _native
 from xorq_datafusion.ml.frontend import (
     Reason,
     Supported,
     Unsupported,
+    apply_fit_result,
     check,
+    default_features,
+    to_fit_spec,
 )
 
 if TYPE_CHECKING:
@@ -53,15 +58,22 @@ def fit(pipeline, df: DataFrame, features: Sequence[str] | None = None):
     """
     Fit ``pipeline`` on ``df`` inside DataFusion, in place.
 
-    ``features`` default to the numeric columns of ``df.schema()``, in order.
-    Returns the same pipeline object, with scikit-learn's fitted attributes
-    set, so its own ``predict``/``transform`` work.
+    ``df`` is any :class:`~xorq_datafusion.DataFrame` (``ctx.sql``,
+    ``ctx.table``, ...); the fit plans are built on its logical plan and run
+    with its session. ``features`` default to the numeric columns of
+    ``df.schema()``, in order. Ctrl-C cancels the fit.
 
-    Raises:
-        NotImplementedError: not implemented yet.
+    Returns:
+        The same pipeline object, with scikit-learn's fitted attributes set,
+        so its own ``predict``/``transform`` work.
 
     """
-    raise NotImplementedError("xorq_datafusion.ml.fit")
+    if features is None:
+        features = default_features(df.schema())
+    spec = to_fit_spec(pipeline, features)
+    result = json.loads(_native.fit(df, json.dumps(spec)))
+    apply_fit_result(pipeline, result)
+    return pipeline
 
 
 def compile(fitted, features: Sequence[str] | None = None) -> Model:

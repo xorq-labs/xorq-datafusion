@@ -7,8 +7,9 @@ or importing it does not load scikit-learn. Install with the ``ml`` extra::
     pip install "xorq-datafusion[ml]"
 
 Status: in progress. The public names below exist with their final
-signatures; ``supports`` works, while ``fit``, ``compile`` and ``Model``
-methods raise ``NotImplementedError`` until the layer is built. Planned first target:
+signatures. ``supports`` works; ``fit`` fits the StandardScaler natively
+and then refuses the KMeans step, whose native fit is not built yet;
+``compile`` and ``Model`` methods raise ``NotImplementedError``. Planned first target:
 ``make_pipeline(StandardScaler(), KMeans(init=C0, n_init=1))``, fit and
 predict, with every computation on row data running natively in DataFusion.
 """

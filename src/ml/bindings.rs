@@ -62,6 +62,18 @@ fn validate_compile_request(json: &str) -> PyResult<String> {
     to_json(&CompileRequest::from_json(json).map_err(to_py_err)?)
 }
 
+/// Fit the steps of a fit request (JSON) on `df`, natively; return the fit
+/// result (JSON). Ctrl-C cancels the fit.
+#[pyfunction]
+fn fit(py: Python, df: &PyDataFrame, request: &str) -> PyResult<String> {
+    ensure_ml_session(df)?;
+    let request = FitRequest::from_json(request).map_err(to_py_err)?;
+    let (state, plan) = df.df.as_ref().clone().into_parts();
+    let result = wait_for_future_interruptible(py, super::fit::fit(state, plan, &request))?
+        .map_err(to_py_err)?;
+    to_json(&result)
+}
+
 /// Collect `df` the way ML entry points execute plans: through
 /// `wait_for_future_interruptible`, so Ctrl-C cancels the query and raises
 /// `KeyboardInterrupt`.
@@ -95,6 +107,7 @@ fn _session_context_without_ml(config: Option<PySessionConfig>) -> PyResult<PySe
 
 pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(ensure_ml_session))?;
+    m.add_wrapped(wrap_pyfunction!(fit))?;
     m.add_wrapped(wrap_pyfunction!(validate_fit_request))?;
     m.add_wrapped(wrap_pyfunction!(validate_fit_result))?;
     m.add_wrapped(wrap_pyfunction!(validate_compile_request))?;

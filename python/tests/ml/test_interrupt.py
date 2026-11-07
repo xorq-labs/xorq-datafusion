@@ -2,13 +2,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 CHILD = Path(__file__).with_name("_interrupt_child.py")
 DEADLINE = 2.0
 
 
-def test_ml_execution_is_interruptible():
+@pytest.mark.parametrize("mode", ["ml", "fit"])
+def test_ml_execution_is_interruptible(mode):
     out = subprocess.run(
-        [sys.executable, str(CHILD), "ml"],
+        [sys.executable, str(CHILD), mode],
         capture_output=True,
         text=True,
         timeout=60,

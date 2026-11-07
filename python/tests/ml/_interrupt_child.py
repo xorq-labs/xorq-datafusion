@@ -3,9 +3,10 @@
 Runs a slow plan through an ML execution path, sends SIGINT to itself from a
 timer thread after ``DELAY`` seconds, and prints how long after the signal
 the KeyboardInterrupt arrived, then whether the runtime still runs queries.
-Usage: python _interrupt_child.py <collect | ml>
+Usage: python _interrupt_child.py <collect | ml | fit>
 """
 
+import json
 import os
 import signal
 import sys
@@ -16,6 +17,14 @@ from xorq_datafusion import SessionContext
 from xorq_datafusion._internal import ml
 
 DELAY = 0.5
+SLOW_INPUT = (
+    "SELECT CAST(a.value * b.value AS DOUBLE) AS x FROM generate_series(1, 100000) a "
+    "CROSS JOIN generate_series(1, 100000) b"
+)
+SCALER_FIT = {
+    "features": ["x"],
+    "steps": [{"kind": "standard_scaler", "with_mean": True, "with_std": True}],
+}
 SLOW = (
     "SELECT count(*) FROM generate_series(1, 100000) a "
     "CROSS JOIN generate_series(1, 100000) b WHERE (a.value * b.value) % 7 = 3"
@@ -25,7 +34,12 @@ SLOW = (
 def main(mode):
     ctx = SessionContext()
     df = ctx.sql(SLOW)
-    run = df.collect if mode == "collect" else lambda: ml._collect_interruptible(df)
+    runs = {
+        "collect": df.collect,
+        "ml": lambda: ml._collect_interruptible(df),
+        "fit": lambda: ml.fit(ctx.sql(SLOW_INPUT), json.dumps(SCALER_FIT)),
+    }
+    run = runs[mode]
     sent = []
 
     def interrupt():

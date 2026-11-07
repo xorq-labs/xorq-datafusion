@@ -12,12 +12,14 @@
 //! - `nodes`: custom logical nodes (`UserDefinedLogicalNodeCore`)
 //! - `rules`: optimizer rules over those nodes
 //! - `exec`: physical operators, UDFs and UDAFs
+//! - `fit`: plan builders and the driver that fit pipeline steps
 //! - `planner`: extension planner and query planner
 //! - `session`: `with_ml`, installing the planner and rules on a session
 //! - `bindings`: the `#[pyfunction]`s and classes exposed as `_internal.ml`
 
 pub(crate) mod bindings;
 pub(crate) mod exec;
+pub(crate) mod fit;
 pub(crate) mod nodes;
 pub(crate) mod planner;
 pub(crate) mod properties;
