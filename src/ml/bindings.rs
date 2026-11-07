@@ -14,6 +14,7 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::from_datafusion_error;
 
 use super::session::has_ml;
+use super::spec::{CompileRequest, FitRequest, FitResult};
 
 /// Raise `ValueError` unless `df`'s session plans with the ML query planner.
 ///
@@ -30,6 +31,33 @@ fn ensure_ml_session(df: &PyDataFrame) -> PyResult<()> {
              xorq_datafusion.SessionContext() or SessionState()",
         ))
     }
+}
+
+fn to_py_err(e: datafusion::error::DataFusionError) -> PyErr {
+    PyValueError::new_err(e.strip_backtrace())
+}
+
+fn to_json<T: serde::Serialize>(value: &T) -> PyResult<String> {
+    serde_json::to_string(value).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Parse and validate a fit request; return it re-serialized.
+#[pyfunction]
+fn validate_fit_request(json: &str) -> PyResult<String> {
+    to_json(&FitRequest::from_json(json).map_err(to_py_err)?)
+}
+
+/// Parse and validate a fit result for `n_features` features; return it
+/// re-serialized.
+#[pyfunction]
+fn validate_fit_result(json: &str, n_features: usize) -> PyResult<String> {
+    to_json(&FitResult::from_json(json, n_features).map_err(to_py_err)?)
+}
+
+/// Parse and validate a compile request; return it re-serialized.
+#[pyfunction]
+fn validate_compile_request(json: &str) -> PyResult<String> {
+    to_json(&CompileRequest::from_json(json).map_err(to_py_err)?)
 }
 
 /// Test support: a `SessionContext` built exactly as `SessionContext(config)`
@@ -52,6 +80,9 @@ fn _session_context_without_ml(config: Option<PySessionConfig>) -> PyResult<PySe
 
 pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(ensure_ml_session))?;
+    m.add_wrapped(wrap_pyfunction!(validate_fit_request))?;
+    m.add_wrapped(wrap_pyfunction!(validate_fit_result))?;
+    m.add_wrapped(wrap_pyfunction!(validate_compile_request))?;
     m.add_wrapped(wrap_pyfunction!(_session_context_without_ml))?;
     Ok(())
 }

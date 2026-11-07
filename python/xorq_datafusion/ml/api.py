@@ -8,69 +8,45 @@ objects and a DataFrame's schema, exchange JSON specs with the native layer
 
 from __future__ import annotations
 
-import enum
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from xorq_datafusion.ml.frontend import (
+    Reason,
+    Supported,
+    Unsupported,
+    check,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from xorq_datafusion import DataFrame
 
+__all__ = [
+    "Model",
+    "Reason",
+    "Supported",
+    "Unsupported",
+    "compile",
+    "fit",
+    "supports",
+]
+
 STAGES = ("logical", "optimized", "physical", "parallel")
-
-
-class Reason(str, enum.Enum):
-    """Why an estimator is not supported by the native ML layer."""
-
-    UNSUPPORTED_ESTIMATOR = "unsupported estimator"
-    UNSUPPORTED_PARAMETER = "unsupported parameter"
-    UNSUPPORTED_PIPELINE_SHAPE = "unsupported pipeline shape"
-    NEEDS_FINE_GRAINED_MUTATION = "needs fine-grained mutation"
-
-
-@dataclass(frozen=True)
-class Supported:
-    """The estimator can be fitted and compiled natively."""
-
-    def __bool__(self) -> bool:
-        """
-        Make the result usable in a boolean context.
-
-        Returns:
-            Always ``True``.
-
-        """
-        return True
-
-
-@dataclass(frozen=True)
-class Unsupported:
-    """The estimator cannot be handled natively, and why."""
-
-    reason: Reason
-    detail: str = ""
-
-    def __bool__(self) -> bool:
-        """
-        Make the result usable in a boolean context.
-
-        Returns:
-            Always ``False``.
-
-        """
-        return False
 
 
 def supports(estimator) -> Supported | Unsupported:
     """
     Report whether ``estimator`` can be fitted and compiled natively.
 
-    Raises:
-        NotImplementedError: not implemented yet.
+    Supported today: ``Pipeline[StandardScaler, KMeans]`` whose KMeans has an
+    array ``init``, ``n_init=1`` (or ``"auto"``) and ``algorithm="lloyd"``.
+
+    Returns:
+        :class:`Supported`, or :class:`Unsupported` with a :class:`Reason`.
 
     """
-    raise NotImplementedError("xorq_datafusion.ml.supports")
+    return check(estimator)
 
 
 def fit(pipeline, df: DataFrame, features: Sequence[str] | None = None):
