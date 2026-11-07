@@ -1,7 +1,57 @@
 //! Python bindings for the ML layer, registered as `_internal.ml`.
 
+use std::sync::Arc;
+
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-pub(crate) fn init_module(_m: &Bound<'_, PyModule>) -> PyResult<()> {
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::prelude::SessionConfig;
+
+use crate::context::{PySessionConfig, PySessionContext};
+use crate::dataframe::PyDataFrame;
+use crate::errors::from_datafusion_error;
+
+use super::session::has_ml;
+
+/// Raise `ValueError` unless `df`'s session plans with the ML query planner.
+///
+/// Sessions built by `SessionState()` / `SessionContext()` always have it; a
+/// session state built elsewhere (e.g. through FFI) may not.
+#[pyfunction]
+fn ensure_ml_session(df: &PyDataFrame) -> PyResult<()> {
+    let (state, _) = df.df.as_ref().clone().into_parts();
+    if has_ml(&state) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(
+            "this DataFrame's session has no ML planner; build it with \
+             xorq_datafusion.SessionContext() or SessionState()",
+        ))
+    }
+}
+
+/// Test support: a `SessionContext` built exactly as `SessionContext(config)`
+/// builds one, minus `with_ml`. Lets tests prove `with_ml` is inert.
+#[pyfunction]
+fn _session_context_without_ml(config: Option<PySessionConfig>) -> PyResult<PySessionContext> {
+    let config = config
+        .map(|c| c.config)
+        .unwrap_or_else(|| SessionConfig::default().with_information_schema(true));
+    let runtime = RuntimeEnvBuilder::default()
+        .build()
+        .map_err(from_datafusion_error)?;
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(Arc::new(runtime))
+        .with_default_features()
+        .build();
+    Ok(PySessionContext::from_session_state(state))
+}
+
+pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_wrapped(wrap_pyfunction!(ensure_ml_session))?;
+    m.add_wrapped(wrap_pyfunction!(_session_context_without_ml))?;
     Ok(())
 }

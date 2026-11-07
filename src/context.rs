@@ -6,6 +6,7 @@ use crate::expr::sort_expr::PySortExpr;
 use crate::ffi_table_provider::{codec_for, HostedFfiTableProvider};
 use crate::functions::hash_int::HashIntFunc;
 use crate::ibis_table::IbisTable;
+use crate::ml::session::with_ml;
 use crate::object_storage::{
     get_object_store, register_object_store_and_config_extensions, AwsOptions, GcpOptions,
 };
@@ -163,11 +164,13 @@ impl PySessionState {
         let runtime_config = RuntimeEnvBuilder::default();
         let runtime = Arc::new(runtime_config.build().unwrap());
 
-        let session_state = SessionStateBuilder::new()
-            .with_config(config)
-            .with_runtime_env(runtime)
-            .with_default_features()
-            .build();
+        let session_state = with_ml(
+            SessionStateBuilder::new()
+                .with_config(config)
+                .with_runtime_env(runtime)
+                .with_default_features(),
+        )
+        .build();
 
         Self { session_state }
     }
@@ -195,6 +198,16 @@ pub(crate) struct PySessionContext {
     pub(crate) ctx: Arc<SessionContext>,
 }
 
+impl PySessionContext {
+    /// Wrap `session_state` in a context, registering the built-in UDFs.
+    pub(crate) fn from_session_state(session_state: SessionState) -> Self {
+        let ctx = SessionContext::new_with_state(session_state);
+        // register the UDF with the context, so it can be invoked by name and from SQL
+        ctx.register_udf(ScalarUDF::from(HashIntFunc::new()));
+        PySessionContext { ctx: Arc::new(ctx) }
+    }
+}
+
 #[pymethods]
 impl PySessionContext {
     #[pyo3(signature = (session_state=None, config=None))]
@@ -207,26 +220,26 @@ impl PySessionContext {
         let runtime = Arc::new(runtime_config.build().map_err(from_datafusion_error)?);
         let session_state = match (session_state, config) {
             (Some(s), _) => s.session_state,
-            (None, Some(c)) => SessionStateBuilder::new()
-                .with_config(c.config)
-                .with_runtime_env(runtime)
-                .with_default_features()
-                .build(),
+            (None, Some(c)) => with_ml(
+                SessionStateBuilder::new()
+                    .with_config(c.config)
+                    .with_runtime_env(runtime)
+                    .with_default_features(),
+            )
+            .build(),
             (None, _) => {
                 let session_config = SessionConfig::default().with_information_schema(true);
-                SessionStateBuilder::new()
-                    .with_config(session_config)
-                    .with_runtime_env(runtime)
-                    .with_default_features()
-                    .build()
+                with_ml(
+                    SessionStateBuilder::new()
+                        .with_config(session_config)
+                        .with_runtime_env(runtime)
+                        .with_default_features(),
+                )
+                .build()
             }
         };
 
-        let ctx = SessionContext::new_with_state(session_state.clone());
-        // register the UDF with the context, so it can be invoked by name and from SQL
-        ctx.register_udf(ScalarUDF::from(HashIntFunc::new()));
-
-        Ok(PySessionContext { ctx: Arc::new(ctx) })
+        Ok(Self::from_session_state(session_state))
     }
 
     /// Returns a PyDataFrame whose plan corresponds to the SQL statement.

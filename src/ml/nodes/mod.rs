@@ -1,1 +1,1 @@
-//! See `crate::ml` for the layer overview.
+//! ML logical nodes (`UserDefinedLogicalNodeCore`).

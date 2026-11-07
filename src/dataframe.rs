@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 use crate::errors::{from_datafusion_error, py_datafusion_err};
 use crate::physical_plan::PyExecutionPlan;
 use crate::record_batch::PyRecordBatchStream;
+use crate::sql::logical::PyLogicalPlan;
 use crate::utils::{get_tokio_handle, wait_for_future};
 use pyo3::pybacked::PyBackedStr;
 use pyo3::IntoPyObjectExt;
@@ -443,6 +444,23 @@ impl PyDataFrame {
     // Executes this DataFrame to get the total number of rows.
     fn count(&self, py: Python) -> PyResult<usize> {
         wait_for_future(py, self.df.as_ref().clone().count()).map_err(from_datafusion_error)
+    }
+
+    /// Get the unoptimized logical plan for this `DataFrame`
+    fn logical_plan(&self) -> PyLogicalPlan {
+        self.df.as_ref().clone().into_unoptimized_plan().into()
+    }
+
+    /// Get the logical plan for this `DataFrame` after the session's optimizer
+    /// rules have run
+    fn optimized_logical_plan(&self) -> PyResult<PyLogicalPlan> {
+        Ok(self
+            .df
+            .as_ref()
+            .clone()
+            .into_optimized_plan()
+            .map_err(from_datafusion_error)?
+            .into())
     }
 
     /// Get the execution plan for this `DataFrame`

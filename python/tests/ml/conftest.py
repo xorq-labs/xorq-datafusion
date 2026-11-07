@@ -7,4 +7,4 @@ pytest.importorskip("sklearn")
 
 @pytest.fixture
 def ctx():
-    return SessionContext(SessionConfig().with_target_partitions(4))
+    return SessionContext(config=SessionConfig().with_target_partitions(4))
