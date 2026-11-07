@@ -152,6 +152,17 @@ def test_scaler_fit_merge_does_not_overflow(ctx):
     assert abs(fitted["mean"][0]) <= 1e150 * 1e-12
 
 
+def test_scaler_fit_merge_does_not_overflow_when_squaring(ctx):
+    # Singleton partitions of -+7e153: delta^2 = 1.96e308 overflows, while
+    # M2 = 9.8e307 and var = 4.9e307 are finite.
+    ctx.register_record_batches(
+        "t", [[pa.record_batch({"a": [sign * 7e153]})] for sign in (-1, 1)]
+    )
+    fitted = native_scaler(ctx.table("t"), ["a"])
+    np.testing.assert_allclose(fitted["var"], [4.9e307], rtol=RTOL)
+    np.testing.assert_allclose(fitted["scale"], [np.sqrt(4.9e307)], rtol=RTOL)
+
+
 def test_native_fit_refuses_chained_scalers(ctx):
     ctx.register_record_batches("t", [[pa.record_batch({"a": [1.0, 3.0]})]])
     scaler = {"kind": "standard_scaler", "with_mean": True, "with_std": True}

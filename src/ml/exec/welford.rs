@@ -111,10 +111,10 @@ impl WelfordState {
         let count = self.count + other.count;
         let (n_a, n_b, n) = (self.count as f64, other.count as f64, count as f64);
         let delta = other.mean - self.mean;
-        // Ratios first: `delta * delta * n_a * n_b` can overflow f64 even
-        // when the merged M2 is finite.
+        // Ratio first, before squaring: `delta * delta` alone can overflow
+        // f64 while the merged M2 is finite.
         self.mean += delta * (n_b / n);
-        self.m2 += other.m2 + delta * delta * (n_a / n) * n_b;
+        self.m2 += other.m2 + delta * (delta * (n_a / n)) * n_b;
         self.count = count;
     }
 }
