@@ -1,0 +1,2 @@
+Predict: features=[a, b], steps=[nearest_centroid(k=2, d=2, weighted, guarded)], output=label
+  TableScan: input

@@ -1,0 +1,2 @@
+Projection: input.a, input.b, __ml_nearest_centroid(CAST(input.a AS Float64), CAST(input.b AS Float64), List([1.0, -2.0, 3.0, -2.5]), List([0.25, 4.0]), List([1.0, 2.0, -2.0, 0.5])) AS label
+  TableScan: input projection=[a, b]
