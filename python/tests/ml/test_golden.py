@@ -5,6 +5,7 @@ Regenerate with ``UPDATE_GOLDEN=1 pytest python/tests/ml/test_golden.py``.
 
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +22,23 @@ GOLDEN = Path(__file__).with_name("golden")
 UPDATE = os.environ.get("UPDATE_GOLDEN") == "1"
 
 
+def normalize(plan):
+    """Renumber ``__common_expr_N`` aliases in order of first appearance.
+
+    The optimizer draws these numbers from a counter shared by a session
+    state and its clones; a fit optimizes other plans (validation, scaler)
+    on that state first, so the numbers shift whenever those passes change.
+    """
+    numbers = {}
+    return re.sub(
+        r"__common_expr_(\d+)",
+        lambda m: f"__common_expr_{numbers.setdefault(m.group(1), len(numbers) + 1)}",
+        plan,
+    )
+
+
 def check(name, actual):
+    actual = normalize(actual)
     path = GOLDEN / f"{name}.txt"
     if UPDATE:
         path.write_text(actual + "\n")
