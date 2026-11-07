@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pyarrow as pa
 import pytest
@@ -205,8 +207,11 @@ def fused_plan(model):
         ([2.0**53], [1.0], [[0.0], [3.0], [-3.0]], 2.0**53 + 2, 1),
         # 1 / scale**2 overflows to inf.
         ([0.0], [1e-200], [[0.0], [1.0]], 0.6e-200, 1),
+        # Centers near 2**53 (ulp 2): s + a*c round-trips exactly, yet the
+        # fused distances tie where the unfused ones do not.
+        ([1.0], [1.0], [[2.0**53 + 8], [2.0**53 + 4]], 2.0**53 + 6, 1),
     ],
-    ids=["large-shift", "tiny-scale"],
+    ids=["large-shift", "tiny-scale", "large-centers"],
 )
 def test_fusion_is_skipped_when_it_would_change_labels(
     ctx, mean, scale, centers, x, label
@@ -223,3 +228,37 @@ def test_fusion_applies_to_a_fitted_model():
     X, init = blobs(9)
     model = ml.compile(sklearn_pipeline(init).fit(X), FEATURES)
     assert "nearest_centroid(k=4, d=3, weighted)" in fused_plan(model)
+
+
+def test_fusion_check_is_fast_for_many_centers():
+    # Coordinate 0 alone separates the centers by 1: the cheap bound decides.
+    k, d = 10_000, 128
+    centers = np.random.default_rng(0).normal(size=(k, d))
+    centers[:, 0] = np.arange(k)
+    model = model_from([0.5] * d, [2.0] * d, centers.tolist())
+    start = time.monotonic()
+    plan = fused_plan(model)
+    assert time.monotonic() - start < 5
+    assert f"nearest_centroid(k={k}, d={d}, weighted)" in plan
+
+
+def test_fusion_check_falls_back_to_pairs():
+    # Random centers: no single coordinate separates them all, the pairwise
+    # check (within the work cap) does.
+    centers = np.random.default_rng(1).normal(size=(500, 32))
+    plan = fused_plan(model_from([0.5] * 32, [2.0] * 32, centers.tolist()))
+    assert "nearest_centroid(k=500, d=32, weighted)" in plan
+
+
+def test_fusion_check_gives_up_rather_than_planning_slowly():
+    # A grid: every coordinate repeats, so the cheap separation bound is 0 and
+    # only the pairwise check could decide; it is far past the work cap.
+    k, d = 10_000, 128
+    centers = np.zeros((k, d))
+    centers[:, 0] = np.arange(k) % 100
+    centers[:, 1] = np.arange(k) // 100
+    model = model_from([1e6] * d, [1.0] * d, centers.tolist())
+    start = time.monotonic()
+    plan = fused_plan(model)
+    assert time.monotonic() - start < 30
+    assert "weighted" not in plan

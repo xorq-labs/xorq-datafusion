@@ -36,24 +36,71 @@ fn as_predict(plan: &LogicalPlan) -> Option<&Predict> {
 #[derive(Debug, Default)]
 pub(crate) struct AffineFusion;
 
-/// How far, relative to the closest pair of centers, a fused center may
-/// drift from the original when mapped back through the affine step.
+/// Fusion must not move any center by more than this fraction of the
+/// distance between the two closest centers.
 const FUSION_TOLERANCE: f64 = 1e-9;
 
-/// Smallest Chebyshev distance between two centers (infinite for one).
-fn min_separation(centers: &[Vec<f64>]) -> f64 {
-    let mut min = f64::INFINITY;
-    for (k, a) in centers.iter().enumerate() {
-        for b in &centers[k + 1..] {
-            let d = a
-                .iter()
-                .zip(b)
-                .map(|(x, y)| (x - y).abs())
-                .fold(0.0, f64::max);
-            min = min.min(d);
-        }
+/// Above this many coordinate comparisons, an inconclusive separation check
+/// gives up (and fusion is skipped) rather than slow planning down.
+const MAX_PAIRWISE_WORK: usize = 50_000_000;
+
+/// A conservative bound, in the predictor's (scaled) space, on how far the
+/// rounding in `c' = s + a * c` and in the fused distance can move a center:
+/// a few ulps of the magnitudes involved, divided by the scale.
+fn fusion_error_bound(shift: &[f64], scale: &[f64], centers: &[Vec<f64>]) -> f64 {
+    centers
+        .iter()
+        .flat_map(|c| {
+            (0..c.len()).map(|j| {
+                4.0 * f64::EPSILON * (shift[j].abs() + (scale[j] * c[j]).abs()) / scale[j].abs()
+            })
+        })
+        .fold(0.0, f64::max)
+}
+
+/// A lower bound on the smallest Chebyshev distance between two centers:
+/// every pair differs by at least the smallest gap of any one coordinate,
+/// so the largest such gap bounds them all. O(d * k log k).
+fn separation_lower_bound(centers: &[Vec<f64>]) -> f64 {
+    let d = centers.first().map_or(0, Vec::len);
+    (0..d)
+        .map(|j| {
+            let mut values: Vec<f64> = centers.iter().map(|c| c[j]).collect();
+            values.sort_by(f64::total_cmp);
+            values
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .fold(f64::INFINITY, f64::min)
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Whether every pair of centers is at least `min` apart (Chebyshev).
+/// Stops at the first pair that is not; `false` past `MAX_PAIRWISE_WORK`.
+fn all_pairs_separated(centers: &[Vec<f64>], min: f64) -> bool {
+    let k = centers.len();
+    let d = centers.first().map_or(0, Vec::len);
+    if k.saturating_mul(k).saturating_mul(d) / 2 > MAX_PAIRWISE_WORK {
+        return false;
     }
-    min
+    centers.iter().enumerate().all(|(i, a)| {
+        centers[i + 1..]
+            .iter()
+            .all(|b| a.iter().zip(b).any(|(x, y)| (x - y).abs() >= min))
+    })
+}
+
+/// Whether fusing cannot move a center by more than `FUSION_TOLERANCE` of
+/// the closest center spacing.
+fn fusion_is_negligible(shift: &[f64], scale: &[f64], centers: &[Vec<f64>]) -> bool {
+    if centers.len() < 2 {
+        return true;
+    }
+    let need = fusion_error_bound(shift, scale, centers) / FUSION_TOLERANCE;
+    if !need.is_finite() {
+        return false;
+    }
+    separation_lower_bound(centers) >= need || all_pairs_separated(centers, need)
 }
 
 fn fuse(affine: &PredictStep, predictor: &PredictStep) -> Option<PredictStep> {
@@ -71,24 +118,13 @@ fn fuse(affine: &PredictStep, predictor: &PredictStep) -> Option<PredictStep> {
     let fused_weights: Vec<f64> = (0..weights.len())
         .map(|j| weights[j] / (scale[j] * scale[j]))
         .collect();
-    // Fusion changes the arithmetic. Keep the original steps when that
-    // change is not negligible: a weight or center that is not finite (tiny
-    // or huge scales), or centers that no longer map back to the originals
-    // closely compared with how far apart the centers are (large shifts lose
-    // the low bits of `scale * c`).
-    if fused_weights.iter().any(|w| !(w.is_finite() && *w > 0.0)) {
-        return None;
-    }
-    let mut drift = 0.0_f64;
-    for (fused, original) in fused_centers.iter().zip(centers) {
-        for j in 0..original.len() {
-            if !fused[j].is_finite() {
-                return None;
-            }
-            drift = drift.max(((fused[j] - shift[j]) / scale[j] - original[j]).abs());
-        }
-    }
-    if drift > FUSION_TOLERANCE * min_separation(centers) {
+    // Fusion changes the arithmetic. Keep the original steps unless that
+    // change is negligible: every weight and center finite (tiny or huge
+    // scales overflow), and the rounding small next to the center spacing
+    // (huge shifts or centers lose the low bits of `s + a * c`).
+    let finite = fused_weights.iter().all(|w| w.is_finite() && *w > 0.0)
+        && fused_centers.iter().flatten().all(|c| c.is_finite());
+    if !(finite && fusion_is_negligible(shift, scale, centers)) {
         return None;
     }
     Some(PredictStep::NearestCentroid {
