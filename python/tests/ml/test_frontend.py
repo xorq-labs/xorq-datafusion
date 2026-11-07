@@ -317,3 +317,53 @@ def test_fit_result_validation_checks_feature_count():
     _native.validate_fit_result(json.dumps(result), 2)
     with pytest.raises(ValueError, match=r"steps\[0\].mean: expected 3 values"):
         _native.validate_fit_result(json.dumps(result), 3)
+
+
+def test_apply_fit_result_clears_state_of_an_earlier_fit(X, init):
+    pd = pytest.importorskip("pandas")
+    spec = to_compile_spec(pipeline(init).fit(X), FEATURES)
+    reused = pipeline(init).fit(pd.DataFrame(X, columns=["a", "b", "c"]))
+    assert hasattr(reused[1], "labels_")
+
+    apply_fit_result(reused, {"steps": spec["steps"]})
+
+    for step in reused:
+        assert not hasattr(step, "feature_names_in_")
+    assert not hasattr(reused[1], "labels_")
+    renamed = pd.DataFrame(X, columns=["d", "e", "f"])
+    # Like a scikit-learn fit on an unnamed array: names are not checked.
+    with pytest.warns(UserWarning, match="fitted without feature names"):
+        labels = reused.predict(renamed)
+    np.testing.assert_array_equal(labels, reused.predict(X))
+
+
+def test_compile_spec_rejects_fractional_sample_count(X, init):
+    weights = np.full(len(X), 0.5)
+    fitted = pipeline(init).fit(
+        X, standardscaler__sample_weight=[*weights[:-1].tolist(), 1.0]
+    )
+    assert fitted[0].n_samples_seen_ != int(fitted[0].n_samples_seen_)
+    with pytest.raises(ValueError, match="one whole count"):
+        to_compile_spec(fitted, FEATURES)
+
+
+def test_compile_spec_rejects_per_feature_sample_counts(X, init):
+    X_nan = X.copy()
+    X_nan[0, 0] = np.nan
+    fitted = pipeline(init)
+    fitted[0].fit(X_nan)
+    fitted[1].fit(np.nan_to_num(fitted[0].transform(X_nan)))
+    assert np.ndim(fitted[0].n_samples_seen_) == 1
+    with pytest.raises(ValueError, match="one whole count"):
+        to_compile_spec(fitted, FEATURES)
+
+
+def test_compile_spec_upcasts_float32_fit_losslessly(X, init):
+    fitted = pipeline(init).fit(X.astype(np.float32))
+    assert fitted[1].cluster_centers_.dtype == np.float32
+    spec = to_compile_spec(fitted, FEATURES)
+    centers = np.asarray(spec["steps"][1]["cluster_centers"])
+    assert centers.dtype == np.float64
+    np.testing.assert_array_equal(
+        centers.astype(np.float32), fitted[1].cluster_centers_
+    )

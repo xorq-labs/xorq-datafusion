@@ -190,9 +190,25 @@ def _optional_list(value) -> list | None:
     return None if value is None else np.asarray(value, dtype=np.float64).tolist()
 
 
+def _sample_count(n_samples_seen) -> int:
+    count = np.asarray(n_samples_seen)
+    if count.ndim != 0 or count != np.round(count):
+        raise ValueError(
+            "StandardScaler.n_samples_seen_ must be one whole count; scalers "
+            "fitted with sample weights or missing values are not supported"
+        )
+    return int(count)
+
+
 def to_compile_spec(fitted, features: Sequence[str]) -> dict:
     """
     Build the compile request for a fitted supported pipeline.
+
+    Fitted arrays are sent as float64; a pipeline fitted on float32 data is
+    upcast losslessly.
+
+    A scaler whose ``n_samples_seen_`` is not one whole count (fitted with
+    sample weights or missing values) is refused with ``ValueError``.
 
     Returns:
         The compile request, validated by the native layer.
@@ -211,7 +227,7 @@ def to_compile_spec(fitted, features: Sequence[str]) -> dict:
                 "mean": _optional_list(scaler.mean_),
                 "var": _optional_list(scaler.var_),
                 "scale": _optional_list(scaler.scale_),
-                "n_samples_seen": int(scaler.n_samples_seen_),
+                "n_samples_seen": _sample_count(scaler.n_samples_seen_),
             },
             {
                 "kind": "kmeans",
@@ -234,10 +250,14 @@ def apply_fit_result(pipeline, result: dict) -> None:
     """
     Set scikit-learn's fitted attributes on ``pipeline`` from a fit result.
 
-    Sets exactly what scikit-learn 1.7's own ``fit`` sets and its
-    ``transform``/``predict`` read, so the pipeline's own methods work.
-    ``KMeans.labels_`` (training labels) is not set: the native fit does not
-    return per-row results.
+    Equivalent to scikit-learn 1.7's own ``fit`` on float64 data: it sets what
+    that fit sets and ``transform``/``predict`` read, all float64, so the
+    pipeline's own methods work on float64 input (scikit-learn's KMeans, fitted
+    on float64, refuses float32 input the same way). Attributes left by an
+    earlier fit that this fit does not produce are removed:
+    ``feature_names_in_`` (the native fit takes columns by name, like a fit on
+    an unnamed array) and ``KMeans.labels_`` (the native fit returns no
+    per-row results).
 
     Raises:
         ValueError: ``result`` does not match ``pipeline``.
@@ -258,6 +278,11 @@ def apply_fit_result(pipeline, result: dict) -> None:
             f"fit result: expected {kmeans.n_clusters} cluster centers, "
             f"got {centers.shape[0]}"
         )
+
+    for step in (scaler, kmeans):
+        for stale in ("feature_names_in_", "labels_"):
+            if stale in vars(step):
+                delattr(step, stale)
 
     scaler.mean_ = _optional_array(fitted_scaler["mean"])
     scaler.var_ = _optional_array(fitted_scaler["var"])
