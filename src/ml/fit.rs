@@ -3,7 +3,11 @@
 use datafusion::arrow::array::{Array, AsArray, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Float64Type, Int64Type, UInt64Type};
 use datafusion::common::{exec_err, not_impl_err, plan_err, Column, Result};
+use std::sync::Arc;
+
+use datafusion::catalog::MemTable;
 use datafusion::dataframe::DataFrame;
+use datafusion::datasource::provider_as_source;
 use datafusion::execution::session_state::SessionState;
 use datafusion::functions::core::expr_fn::get_field;
 use datafusion::functions::math::expr_fn::sqrt;
@@ -11,6 +15,7 @@ use datafusion::functions_aggregate::count::count_all;
 use datafusion::logical_expr::{cast, lit, when, Expr, LogicalPlan, LogicalPlanBuilder};
 
 use super::exec::welford::{welford_udaf, COUNT, M2, MEAN};
+use super::kmeans;
 use super::spec::{FitRequest, FitResult, FittedStep, StepSpec};
 
 /// `f64::EPSILON`, as scikit-learn's `_is_constant_feature` uses.
@@ -134,18 +139,178 @@ fn read_scaler(
     })
 }
 
+/// `input`'s features after a fitted scaler, as scikit-learn's `transform`
+/// computes them (`(x - mean) / scale`, per flags), keeping the feature names.
+fn transform_plan(
+    input: LogicalPlan,
+    features: &[String],
+    scaler: &FittedStep,
+) -> Result<LogicalPlan> {
+    let FittedStep::StandardScaler {
+        with_mean,
+        with_std,
+        mean,
+        scale,
+        ..
+    } = scaler
+    else {
+        return plan_err!("transform_plan needs a fitted standard_scaler");
+    };
+    let exprs = features.iter().enumerate().map(|(j, name)| {
+        let mut expr = cast(feature(name), DataType::Float64);
+        if let (true, Some(mean)) = (with_mean, mean) {
+            expr = expr - lit(mean[j]);
+        }
+        if let (true, Some(scale)) = (with_std, scale) {
+            expr = expr / lit(scale[j]);
+        }
+        expr.alias(name)
+    });
+    LogicalPlanBuilder::from(input).project(exprs)?.build()
+}
+
+/// scikit-learn's `_tolerance`: `tol` times the mean feature variance of the
+/// KMeans input, or 0 when `tol` is 0.
+async fn absolute_tolerance(
+    state: &SessionState,
+    input: &LogicalPlan,
+    n_features: usize,
+    tol: f64,
+) -> Result<f64> {
+    if tol == 0.0 {
+        return Ok(0.0);
+    }
+    let names: Vec<String> = (0..n_features).map(kmeans::x).collect();
+    let plan = scaler_fit_plan(input.clone(), &names)?;
+    let batches = DataFrame::new(state.clone(), plan).collect().await?;
+    let FittedStep::StandardScaler { var: Some(var), .. } =
+        read_scaler(&batches, &names, true, true)?
+    else {
+        return plan_err!("variance of the KMeans input is missing");
+    };
+    Ok(tol * var.iter().sum::<f64>() / n_features as f64)
+}
+
+/// `input`'s feature columns, read from the source exactly once: a fit with
+/// more than one step reads its input more than once, and a source (e.g. a
+/// registered record batch reader) may be single-shot. Partitioning is kept.
+async fn read_once(
+    state: &SessionState,
+    input: LogicalPlan,
+    features: &[String],
+    n_steps: usize,
+) -> Result<LogicalPlan> {
+    if n_steps < 2 {
+        return Ok(input);
+    }
+    let columns = features.iter().map(|name| feature(name));
+    let projected = LogicalPlanBuilder::from(input).project(columns)?.build()?;
+    let partitions = DataFrame::new(state.clone(), projected.clone())
+        .collect_partitioned()
+        .await?;
+    let schema = Arc::new(projected.schema().as_arrow().clone());
+    let table = MemTable::try_new(schema, partitions)?;
+    LogicalPlanBuilder::scan("__ml_fit_input", provider_as_source(Arc::new(table)), None)?.build()
+}
+
+/// Materialize the KMeans input and build its `Iterate` fit plan.
+async fn prepare_kmeans(
+    state: &SessionState,
+    input: LogicalPlan,
+    features: &[String],
+    init: &[Vec<f64>],
+    max_iter: usize,
+    tol: f64,
+) -> Result<(LogicalPlan, LogicalPlan)> {
+    let renamed = features
+        .iter()
+        .enumerate()
+        .map(|(j, name)| cast(feature(name), DataType::Float64).alias(kmeans::x(j)));
+    let projected = LogicalPlanBuilder::from(input).project(renamed)?.build()?;
+    let batches = DataFrame::new(state.clone(), projected).collect().await?;
+    let partitions = state.config().target_partitions();
+    let materialized = kmeans::materialized_input(batches, partitions)?;
+    let tol = absolute_tolerance(state, &materialized, features.len(), tol).await?;
+    let plan = kmeans::kmeans_fit_plan(materialized.clone(), init, max_iter, tol)?;
+    Ok((materialized, plan))
+}
+
+/// The KMeans `Iterate` fit plan `fit` would run for `request` (executing
+/// the steps before it, and the materialization of its input).
+pub(crate) async fn kmeans_fit_plan_for(
+    state: SessionState,
+    input: LogicalPlan,
+    request: &FitRequest,
+) -> Result<LogicalPlan> {
+    let features = &request.features;
+    let mut current = read_once(&state, input, features, request.steps.len()).await?;
+    for step in &request.steps {
+        match step {
+            StepSpec::StandardScaler {
+                with_mean,
+                with_std,
+            } => {
+                let plan = scaler_fit_plan(current.clone(), features)?;
+                let batches = DataFrame::new(state.clone(), plan).collect().await?;
+                let fitted = read_scaler(&batches, features, *with_mean, *with_std)?;
+                current = transform_plan(current, features, &fitted)?;
+            }
+            StepSpec::KMeans {
+                init,
+                max_iter,
+                tol,
+                ..
+            } => {
+                let (_, plan) =
+                    prepare_kmeans(&state, current, features, init, *max_iter, *tol).await?;
+                return Ok(plan);
+            }
+        }
+    }
+    plan_err!("the fit request has no kmeans step")
+}
+
+async fn fit_kmeans(
+    state: &SessionState,
+    input: LogicalPlan,
+    features: &[String],
+    n_clusters: usize,
+    init: &[Vec<f64>],
+    max_iter: usize,
+    tol: f64,
+) -> Result<FittedStep> {
+    // Materialize the (transformed) input once: the loop re-reads it every
+    // iteration, and a source may be single-shot.
+    let (materialized, plan) = prepare_kmeans(state, input, features, init, max_iter, tol).await?;
+    let output = DataFrame::new(state.clone(), plan).collect().await?;
+    let (cluster_centers, n_iter) = kmeans::read_centers(&output, n_clusters, features.len())?;
+    let inertia_plan = kmeans::inertia_plan(materialized, &cluster_centers)?;
+    let inertia = kmeans::read_inertia(
+        &DataFrame::new(state.clone(), inertia_plan)
+            .collect()
+            .await?,
+    )?;
+    Ok(FittedStep::KMeans {
+        cluster_centers,
+        inertia,
+        n_iter,
+    })
+}
+
 /// Fit every step of `request` on `input`, planning and executing with
-/// `state`. Never calls into Python.
+/// `state`. Each step sees the previous steps' output. Never calls into
+/// Python.
 pub(crate) async fn fit(
     state: SessionState,
     input: LogicalPlan,
     request: &FitRequest,
 ) -> Result<FitResult> {
+    let features = &request.features;
+    let mut current = read_once(&state, input, features, request.steps.len()).await?;
     let mut steps = Vec::with_capacity(request.steps.len());
     for (i, step) in request.steps.iter().enumerate() {
         match step {
-            // A later step must see the earlier steps' output, and only
-            // KMeans consumes a transformed input so far.
+            // Only KMeans consumes a transformed input so far.
             StepSpec::StandardScaler { .. } if i > 0 => {
                 return not_impl_err!(
                     "steps[{i}]: a standard_scaler after another step is not supported"
@@ -155,21 +320,33 @@ pub(crate) async fn fit(
                 with_mean,
                 with_std,
             } => {
-                let plan = scaler_fit_plan(input.clone(), &request.features)?;
+                let plan = scaler_fit_plan(current.clone(), features)?;
                 let batches = DataFrame::new(state.clone(), plan).collect().await?;
-                steps.push(read_scaler(
-                    &batches,
-                    &request.features,
-                    *with_mean,
-                    *with_std,
-                )?);
+                let fitted = read_scaler(&batches, features, *with_mean, *with_std)?;
+                current = transform_plan(current, features, &fitted)?;
+                steps.push(fitted);
             }
-            StepSpec::KMeans { .. } => {
-                return not_impl_err!("native KMeans fit is not implemented yet")
+            StepSpec::KMeans {
+                n_clusters,
+                init,
+                max_iter,
+                tol,
+            } => {
+                let fitted = fit_kmeans(
+                    &state,
+                    current.clone(),
+                    features,
+                    *n_clusters,
+                    init,
+                    *max_iter,
+                    *tol,
+                )
+                .await?;
+                steps.push(fitted);
             }
         }
     }
     let result = FitResult { steps };
-    result.validate(request.features.len())?;
+    result.validate(features.len())?;
     Ok(result)
 }

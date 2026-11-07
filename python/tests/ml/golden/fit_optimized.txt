@@ -1,0 +1,20 @@
+Iterate: key=[__ml_cluster], max_iter=300, converged=__ml_converged, semantics=ByKey
+  Projection: column1 AS __ml_cluster, column2 AS __ml_c0, column3 AS __ml_c1, column4 AS __ml_p0, column5 AS __ml_p1
+    Values: (Int64(0), Float64(-1), Float64(0), Float64(NULL), Float64(NULL)), (Int64(1), Float64(1), Float64(0), Float64(NULL), Float64(NULL))
+  Projection: __ml_cluster, __ml_c0, __ml_c1, __ml_p0, __ml_p1, __ml_changed_total = Int64(0) OR __ml_shift_total <= Float64(0) AS __ml_converged
+    WindowAggr: windowExpr=[[sum(__ml_changed_k) ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __ml_changed_total, sum(__ml_shift_k) ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __ml_shift_total]]
+      Projection: cur.__ml_cluster AS __ml_cluster, new.__ml_changed_k AS __ml_changed_k, __common_expr_21 * __common_expr_21 + __common_expr_22 * __common_expr_22 AS __ml_shift_k, new.__ml_m0 AS __ml_c0, new.__ml_m1 AS __ml_c1, cur.__ml_c0 AS __ml_p0, cur.__ml_c1 AS __ml_p1
+        Projection: new.__ml_m0 - cur.__ml_c0 AS __common_expr_21, new.__ml_m1 - cur.__ml_c1 AS __common_expr_22, new.__ml_changed_k, new.__ml_m0, new.__ml_m1, cur.__ml_cluster, cur.__ml_c0, cur.__ml_c1
+          Inner Join: new.__ml_label = cur.__ml_cluster
+            SubqueryAlias: new
+              Aggregate: groupBy=[[__ml_label]], aggr=[[sum(__ml_changed) AS __ml_changed_k, avg(__ml_x0) AS __ml_m0, avg(__ml_x1) AS __ml_m1]]
+                Projection: __ml_label, CASE WHEN __ml_no_prev = Int64(1) OR __ml_label != __ml_label_prev THEN Int64(1) ELSE Int64(0) END AS __ml_changed, __ml_x0, __ml_x1
+                  Aggregate: groupBy=[[__ml_kmeans_input.__ml_row_id]], aggr=[[first_value(__ml_cluster) ORDER BY [__ml_dist ASC NULLS LAST, __ml_cluster ASC NULLS LAST] AS __ml_label, first_value(__ml_cluster) ORDER BY [__ml_dist_prev ASC NULLS LAST, __ml_cluster ASC NULLS LAST] AS __ml_label_prev, max(CAST(__ml_dist_prev IS NULL AS Int64)) AS __ml_no_prev, first_value(__ml_kmeans_input.__ml_x0) AS __ml_x0, first_value(__ml_kmeans_input.__ml_x1) AS __ml_x1]]
+                    Projection: __ml_kmeans_input.__ml_row_id, __ml_cluster, __ml_kmeans_input.__ml_x0, __ml_kmeans_input.__ml_x1, __common_expr_23 * __common_expr_23 + __common_expr_24 * __common_expr_24 AS __ml_dist, __common_expr_25 * __common_expr_25 + __common_expr_26 * __common_expr_26 AS __ml_dist_prev
+                      Projection: __ml_kmeans_input.__ml_x0 - __ml_c0 AS __common_expr_23, __ml_kmeans_input.__ml_x1 - __ml_c1 AS __common_expr_24, __ml_kmeans_input.__ml_x0 - __ml_p0 AS __common_expr_25, __ml_kmeans_input.__ml_x1 - __ml_p1 AS __common_expr_26, __ml_cluster, __ml_kmeans_input.__ml_row_id, __ml_kmeans_input.__ml_x0, __ml_kmeans_input.__ml_x1
+                        Cross Join:
+                          LoopState: [__ml_cluster, __ml_c0, __ml_c1, __ml_p0, __ml_p1]
+                          TableScan: __ml_kmeans_input projection=[__ml_row_id, __ml_x0, __ml_x1]
+            SubqueryAlias: cur
+              Projection: __ml_cluster, __ml_c0, __ml_c1
+                LoopState: [__ml_cluster, __ml_c0, __ml_c1, __ml_p0, __ml_p1]

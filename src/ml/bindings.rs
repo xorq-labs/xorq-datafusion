@@ -74,6 +74,31 @@ fn fit(py: Python, df: &PyDataFrame, request: &str) -> PyResult<String> {
     to_json(&result)
 }
 
+/// The KMeans fit plan for a fit request (JSON) on `df`, rendered at
+/// `stage` (`logical` or `optimized`). Runs the steps before KMeans.
+#[pyfunction]
+fn explain_fit(py: Python, df: &PyDataFrame, request: &str, stage: &str) -> PyResult<String> {
+    ensure_ml_session(df)?;
+    let request = FitRequest::from_json(request).map_err(to_py_err)?;
+    let (state, input) = df.df.as_ref().clone().into_parts();
+    let plan = wait_for_future_interruptible(
+        py,
+        super::fit::kmeans_fit_plan_for(state.clone(), input, &request),
+    )?
+    .map_err(to_py_err)?;
+    let plan = match stage {
+        "logical" => plan,
+        "optimized" => state.optimize(&plan).map_err(to_py_err)?,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "stage must be 'logical' or 'optimized', got {other:?}"
+            )))
+        }
+    };
+    let rendered = plan.display_indent().to_string();
+    Ok(rendered)
+}
+
 /// Collect `df` the way ML entry points execute plans: through
 /// `wait_for_future_interruptible`, so Ctrl-C cancels the query and raises
 /// `KeyboardInterrupt`.
@@ -108,6 +133,7 @@ fn _session_context_without_ml(config: Option<PySessionConfig>) -> PyResult<PySe
 pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(ensure_ml_session))?;
     m.add_wrapped(wrap_pyfunction!(fit))?;
+    m.add_wrapped(wrap_pyfunction!(explain_fit))?;
     m.add_wrapped(wrap_pyfunction!(validate_fit_request))?;
     m.add_wrapped(wrap_pyfunction!(validate_fit_result))?;
     m.add_wrapped(wrap_pyfunction!(validate_compile_request))?;

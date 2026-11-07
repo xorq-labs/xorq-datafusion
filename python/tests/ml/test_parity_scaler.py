@@ -8,7 +8,6 @@ from sklearn.cluster import KMeans
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-import xorq_datafusion.ml as ml
 from xorq_datafusion import SessionContext
 from xorq_datafusion._internal import ml as _native
 from xorq_datafusion.ml.frontend import to_fit_spec
@@ -177,14 +176,6 @@ def test_scaler_fit_refuses_empty_input(ctx):
     )
     with pytest.raises(ValueError, match="no rows"):
         native_scaler(ctx.table("t"), ["a"])
-
-
-def test_ml_fit_stops_at_kmeans_until_its_fit_lands(ctx, tmp_path):
-    X = blobs(np.random.default_rng(3))
-    df = register(ctx, "record_batches", to_table(X, "blobs"), tmp_path)
-    pipeline = make_pipeline(StandardScaler(), KMeans(2, init=X[:2], n_init=1))
-    with pytest.raises(ValueError, match="KMeans fit is not implemented"):
-        ml.fit(pipeline, df)
 
 
 def test_welford_is_registered_under_ml_name():

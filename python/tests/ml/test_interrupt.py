@@ -8,10 +8,14 @@ CHILD = Path(__file__).with_name("_interrupt_child.py")
 DEADLINE = 2.0
 
 
-@pytest.mark.parametrize("mode", ["ml", "fit"])
-def test_ml_execution_is_interruptible(mode):
+# kmeans: signal after 3 s, once the input is materialized and IterateExec
+# is looping.
+@pytest.mark.parametrize(
+    ("mode", "delay"), [("ml", 0.5), ("fit", 0.5), ("kmeans", 3.0)]
+)
+def test_ml_execution_is_interruptible(mode, delay):
     out = subprocess.run(
-        [sys.executable, str(CHILD), mode],
+        [sys.executable, str(CHILD), mode, str(delay)],
         capture_output=True,
         text=True,
         timeout=60,
