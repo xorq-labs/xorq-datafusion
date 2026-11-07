@@ -15,6 +15,14 @@ dependencies = [
     "pyarrow>=18.0.0,<22; python_version >= '3.10' and python_version < '4.0'",
 ]
 
+[project.optional-dependencies]
+# Experimental ML layer (xorq_datafusion.ml): fit/predict scikit-learn
+# pipelines inside DataFusion. Not imported by the base package.
+ml = [
+    "scikit-learn>=1.7",
+    "numpy",
+]
+
 [dependency-groups]
 dev = [
     "codespell[hard-encoding-detection,toml]==2.4.1",
@@ -34,6 +42,7 @@ test = [
     "pandas>=2.2.3",
     "hypothesis>=6.0.0",
     "batchcorder==0.1.3",
+    "scikit-learn>=1.7.2",
 ]
 
 [tool.maturin]

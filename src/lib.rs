@@ -15,6 +15,7 @@ mod functions;
 mod ibis_filter_expression;
 mod ibis_table;
 mod ibis_table_exec;
+mod ml;
 pub mod model;
 mod optimizer;
 pub mod physical_plan;
@@ -88,6 +89,11 @@ fn _internal(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
     let builder = PyModule::new(py, "builder")?;
     builder::init_module(&builder)?;
     m.add_submodule(&builder)?;
+
+    // Experimental ML layer; the Python side lives in `xorq_datafusion.ml`.
+    let ml = PyModule::new(py, "ml")?;
+    ml::init_module(&ml)?;
+    m.add_submodule(&ml)?;
 
     Ok(())
 }

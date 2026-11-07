@@ -9,6 +9,8 @@ cfgv==3.4.0
     # via pre-commit
 chardet==5.2.0
     # via codespell
+cloudpickle==3.1.2
+    # via joblib
 codespell==2.4.1
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
@@ -44,6 +46,8 @@ ipython-pygments-lexers==1.1.1 ; python_full_version >= '3.11'
     # via ipython
 jedi==0.19.2
     # via ipython
+joblib==1.6.0
+    # via scikit-learn
 markdown-it-py==3.0.0
     # via rich
 matplotlib-inline==0.1.7
@@ -51,16 +55,24 @@ matplotlib-inline==0.1.7
 maturin==1.8.7
 mdurl==0.1.2
     # via markdown-it-py
+narwhals==2.28.0 ; python_full_version >= '3.11'
+    # via scikit-learn
 nodeenv==1.9.1
     # via pre-commit
 numpy==2.2.6 ; python_full_version < '3.11'
     # via
     #   ibis-framework
     #   pandas
+    #   scikit-learn
+    #   scipy
+    #   xorq-datafusion
 numpy==2.3.0 ; python_full_version >= '3.11'
     # via
     #   ibis-framework
     #   pandas
+    #   scikit-learn
+    #   scipy
+    #   xorq-datafusion
 packaging==25.0
     # via
     #   ibis-framework
@@ -113,6 +125,16 @@ pyyaml==6.0.2
 rich==14.0.0
     # via ibis-framework
 ruff==0.11.13
+scikit-learn==1.7.2 ; python_full_version < '3.11'
+    # via xorq-datafusion
+scikit-learn==1.9.1 ; python_full_version >= '3.11'
+    # via xorq-datafusion
+scipy==1.15.3 ; python_full_version < '3.11'
+    # via scikit-learn
+scipy==1.17.1 ; python_full_version == '3.11.*'
+    # via scikit-learn
+scipy==1.18.1 ; python_full_version >= '3.12'
+    # via scikit-learn
 six==1.17.0
     # via python-dateutil
 sortedcontainers==2.4.0
@@ -121,6 +143,8 @@ sqlglot==26.28.1
     # via ibis-framework
 stack-data==0.6.3
     # via ipython
+threadpoolctl==3.8.0
+    # via scikit-learn
 tomli==2.2.1 ; python_full_version <= '3.11'
     # via
     #   codespell
