@@ -27,8 +27,10 @@ pub(crate) trait StepProperties {
     fn is_row_wise(&self) -> bool;
 }
 
-/// A fitted step as `Predict` carries it.
-#[derive(Debug, Clone, PartialEq)]
+/// A fitted step as `Predict` carries it. Equality, hashing and order all
+/// compare the numbers' bit patterns, so they agree with each other (`0.0`
+/// and `-0.0` differ; a NaN equals itself).
+#[derive(Debug, Clone)]
 pub(crate) enum PredictStep {
     DiagonalAffine {
         shift: Vec<f64>,
@@ -85,6 +87,12 @@ impl PredictStep {
                 (1, all)
             }
         }
+    }
+}
+
+impl PartialEq for PredictStep {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits() == other.bits()
     }
 }
 

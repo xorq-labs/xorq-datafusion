@@ -6,6 +6,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 import xorq_datafusion.ml as ml
+from xorq_datafusion._internal import ml as _native
 
 FEATURES = ["x0", "x1", "x2"]
 
@@ -171,3 +172,54 @@ def test_explain_stages(ctx):
     assert model.explain("parallel") == "not yet implemented"
     with pytest.raises(ValueError, match="stage must be one of"):
         model.explain("bogus")
+
+
+def model_from(mean, scale, centers):
+    """A Model from exact fitted values (one or more features)."""
+    d = len(mean)
+    steps = [
+        {
+            "kind": "standard_scaler",
+            "with_mean": True,
+            "with_std": True,
+            "mean": mean,
+            "var": [s * s for s in scale],
+            "scale": scale,
+            "n_samples_seen": 10,
+        },
+        {"kind": "kmeans", "cluster_centers": centers, "inertia": 0.0, "n_iter": 1},
+    ]
+    return ml.Model(steps, [f"x{j}" for j in range(d)])
+
+
+def fused_plan(model):
+    return _native.explain_predict(model._request(model.features), "label", "fused")
+
+
+@pytest.mark.parametrize(
+    ("mean", "scale", "centers", "x", "label"),
+    [
+        # 2**53 + 3 is not representable: the fused center would round onto
+        # 2**53 + 4 and tie with x = 2**53 + 2, whose scaled value 2 is
+        # nearest to center 3.
+        ([2.0**53], [1.0], [[0.0], [3.0], [-3.0]], 2.0**53 + 2, 1),
+        # 1 / scale**2 overflows to inf.
+        ([0.0], [1e-200], [[0.0], [1.0]], 0.6e-200, 1),
+    ],
+    ids=["large-shift", "tiny-scale"],
+)
+def test_fusion_is_skipped_when_it_would_change_labels(
+    ctx, mean, scale, centers, x, label
+):
+    model = model_from(mean, scale, centers)
+    assert "weighted" not in fused_plan(model)
+    ctx.register_record_batches("t", [[pa.record_batch({"x0": [x], "id": [0]})]])
+    assert model.predict(ctx.table("t")).to_arrow_table().column(
+        "label"
+    ).to_pylist() == [label]
+
+
+def test_fusion_applies_to_a_fitted_model():
+    X, init = blobs(9)
+    model = ml.compile(sklearn_pipeline(init).fit(X), FEATURES)
+    assert "nearest_centroid(k=4, d=3, weighted)" in fused_plan(model)
