@@ -210,8 +210,11 @@ def fused_plan(model):
         # Centers near 2**53 (ulp 2): s + a*c round-trips exactly, yet the
         # fused distances tie where the unfused ones do not.
         ([1.0], [1.0], [[2.0**53 + 8], [2.0**53 + 4]], 2.0**53 + 6, 1),
+        # A scale below the safe domain (2**-500): the error bound underflows
+        # to 0 there, so only the domain check can refuse it (6v4e).
+        ([0.0], [2.0**-511], [[0.7071067811865475 * 2.0**-537], [0.0]], 0.0, 0),
     ],
-    ids=["large-shift", "tiny-scale", "large-centers"],
+    ids=["large-shift", "tiny-scale", "large-centers", "subnormal-scale"],
 )
 def test_fusion_is_skipped_when_it_would_change_labels(
     ctx, mean, scale, centers, x, label
@@ -262,3 +265,14 @@ def test_fusion_check_gives_up_rather_than_planning_slowly():
     plan = fused_plan(model)
     assert time.monotonic() - start < 30
     assert "weighted" not in plan
+
+
+def test_fused_predict_nulls_rows_whose_unfused_transform_overflows(ctx):
+    # (x - 0) / 1e-100 overflows for x = 1e308: the unfused plan labels it
+    # null, so the fused one must too (beh5); smaller x still get labels.
+    model = model_from([0.0], [1e-100], [[0.0], [1.0]])
+    assert "weighted" in fused_plan(model)
+    xs = [1e308, -1e308, 0.0, 1e-100]
+    ctx.register_record_batches("t", [[pa.record_batch({"x0": xs, "id": range(4)})]])
+    labels = labels_in_row_order(model.predict(ctx.table("t"))).to_pylist()
+    assert labels == [None, None, 0, 1]

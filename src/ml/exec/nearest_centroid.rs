@@ -1,8 +1,9 @@
-//! `__ml_nearest_centroid(x_1, ..., x_d, centers, weights) -> Int64`: the
+//! `__ml_nearest_centroid(x_1, ..., x_d, centers, weights, bounds) -> Int64`: the
 //! index of the nearest of `k` centers under
 //! `sum_j weights_j * (x_j - c_kj)^2`, ties to the lowest index. `centers` is a constant list of `k * d` Float64 (row
-//! major), `weights` a constant list of `d`. A row with a null or non-finite
-//! feature gets a null label.
+//! major), `weights` a constant list of `d`, `bounds` a constant list of
+//! `2 * d` (`low_j, high_j` pairs) or empty. A row with a null or
+//! non-finite feature, or one outside its bounds, gets a null label.
 
 use std::sync::Arc;
 
@@ -22,7 +23,11 @@ pub(crate) fn nearest_centroid_udf() -> Arc<ScalarUDF> {
 }
 
 /// The constant `centers` and `weights` arguments for `centers`/`weights`.
-pub(crate) fn constant_args(centers: &[Vec<f64>], weights: &[f64]) -> (ScalarValue, ScalarValue) {
+pub(crate) fn constant_args(
+    centers: &[Vec<f64>],
+    weights: &[f64],
+    bounds: &[(f64, f64)],
+) -> (ScalarValue, ScalarValue, ScalarValue) {
     let list = |values: Vec<f64>| {
         let values: Vec<ScalarValue> = values
             .into_iter()
@@ -30,7 +35,8 @@ pub(crate) fn constant_args(centers: &[Vec<f64>], weights: &[f64]) -> (ScalarVal
             .collect();
         ScalarValue::List(ScalarValue::new_list_nullable(&values, &DataType::Float64))
     };
-    (list(centers.concat()), list(weights.to_vec()))
+    let bounds = bounds.iter().flat_map(|&(lo, hi)| [lo, hi]).collect();
+    (list(centers.concat()), list(weights.to_vec()), list(bounds))
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -62,8 +68,8 @@ impl ScalarUDFImpl for NearestCentroid {
     }
 
     fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
-        let Some((features, _)) = arg_types.split_last_chunk::<2>() else {
-            return plan_err!("{NAME} takes features, centers and weights");
+        let Some((features, _)) = arg_types.split_last_chunk::<3>() else {
+            return plan_err!("{NAME} takes features, centers, weights and bounds");
         };
         if features.is_empty() || features.iter().any(|t| t != &DataType::Float64) {
             return plan_err!("{NAME} features must be one or more Float64 arguments");
@@ -73,12 +79,20 @@ impl ScalarUDFImpl for NearestCentroid {
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let n = args.number_rows;
-        let Some((features, [centers, weights])) = args.args.split_last_chunk::<2>() else {
-            return exec_err!("{NAME} takes features, centers and weights");
+        let Some((features, [centers, weights, bounds])) = args.args.split_last_chunk::<3>() else {
+            return exec_err!("{NAME} takes features, centers, weights and bounds");
         };
         let d = features.len();
         let centers = constant_list(centers, "centers")?;
         let weights = constant_list(weights, "weights")?;
+        let bounds = constant_list(bounds, "bounds")?;
+        if !(bounds.is_empty() || bounds.len() == 2 * d) {
+            return exec_err!(
+                "{NAME}: {d} features need 0 or {} bounds, got {}",
+                2 * d,
+                bounds.len()
+            );
+        }
         if d == 0 || weights.len() != d || centers.is_empty() || centers.len() % d != 0 {
             return exec_err!(
                 "{NAME}: {d} features, {} weights, {} center values do not fit",
@@ -100,6 +114,13 @@ impl ScalarUDFImpl for NearestCentroid {
                     .iter()
                     .any(|c| c.is_null(row) || !c.value(row).is_finite())
                 {
+                    return None;
+                }
+                let outside = |j: usize| {
+                    let x = columns[j].value(row);
+                    x < bounds[2 * j] || x > bounds[2 * j + 1]
+                };
+                if !bounds.is_empty() && (0..d).any(outside) {
                     return None;
                 }
                 let mut best = (0_i64, f64::INFINITY);

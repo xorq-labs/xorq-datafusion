@@ -29,7 +29,12 @@ uv run python examples/ml_demo.py
 
 Limitations: a KMeans cluster that receives no rows keeps its previous center
 (scikit-learn relocates it); missing and non-finite values are refused; data
-is Float64; only `fit` is interruptible with Ctrl-C.
+is Float64; only `fit` is interruptible with Ctrl-C. Predict folds the scaler
+into the centroids only for shifts, scales and centers of magnitude
+2^-500..2^500 (else it keeps the steps apart); folded or not, a row within
+floating-point rounding of a decision boundary may get a different label than
+scikit-learn gives it, as scikit-learn's own `predict` may differ from the
+direct distance formula there.
 
 Walk the layers (each entry is `file` — `symbol`):
 

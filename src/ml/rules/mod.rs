@@ -124,13 +124,48 @@ fn fuse(affine: &PredictStep, predictor: &PredictStep) -> Option<PredictStep> {
     // (huge shifts or centers lose the low bits of `s + a * c`).
     let finite = fused_weights.iter().all(|w| w.is_finite() && *w > 0.0)
         && fused_centers.iter().flatten().all(|c| c.is_finite());
-    if !(finite && fusion_is_negligible(shift, scale, centers)) {
+    if !(in_safe_domain(shift, scale, centers)
+        && finite
+        && fusion_is_negligible(shift, scale, centers))
+    {
         return None;
     }
     Some(PredictStep::NearestCentroid {
         centers: fused_centers,
         weights: fused_weights,
+        bounds: fused_bounds(shift, scale, predictor.input_bounds()),
     })
+}
+
+/// The magnitudes fusion accepts (decided in kata gykw, option b): every
+/// shift, scale and center is zero (not for scales) or a normal float in
+/// `[2^-500, 2^500]`. Outside it the error bound itself can underflow or
+/// overflow, so it cannot vouch for the fusion.
+fn in_safe_domain(shift: &[f64], scale: &[f64], centers: &[Vec<f64>]) -> bool {
+    let (min, max) = (2f64.powi(-500), 2f64.powi(500));
+    let normal = |v: f64| v.is_normal() && (min..=max).contains(&v.abs());
+    shift.iter().all(|&s| s == 0.0 || normal(s))
+        && scale.iter().all(|&a| normal(a))
+        && centers.iter().flatten().all(|&c| c == 0.0 || normal(c))
+}
+
+/// Raw-space bounds of the fused step: where the unfused `(x - s) / a`
+/// stays finite (`|x - s| <= f64::MAX * |a|`), intersected with the
+/// predictor's own bounds mapped through `s + a * b`. Outside them the
+/// unfused plan labels null, so the fused one must too.
+fn fused_bounds(shift: &[f64], scale: &[f64], predictor: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    (0..shift.len())
+        .map(|j| {
+            let reach = f64::MAX * scale[j].abs();
+            let (mut lo, mut hi) = (shift[j] - reach, shift[j] + reach);
+            if let Some(&(plo, phi)) = predictor.get(j) {
+                let (a, b) = (shift[j] + scale[j] * plo, shift[j] + scale[j] * phi);
+                lo = lo.max(a.min(b));
+                hi = hi.min(a.max(b));
+            }
+            (lo, hi)
+        })
+        .collect()
 }
 
 impl OptimizerRule for AffineFusion {
@@ -222,9 +257,10 @@ impl OptimizerRule for LowerPredict {
                     .map(|(j, x)| (x - lit(shift[j])) / lit(scale[j]))
                     .collect();
             } else if let Some((centers, weights)) = step.nearest_centroid() {
-                let (centers, weights) = constant_args(centers, weights);
+                let (centers, weights, bounds) =
+                    constant_args(centers, weights, step.input_bounds());
                 let mut args = features.clone();
-                args.extend([lit(centers), lit(weights)]);
+                args.extend([lit(centers), lit(weights), lit(bounds)]);
                 label = Some(nearest_centroid_udf().call(args));
             }
         }
