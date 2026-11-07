@@ -118,11 +118,46 @@ def test_scaler_fit_builds_on_any_dataframe(ctx, tmp_path):
     assert_matches_sklearn(native_scaler(df, ["c", "a"]), kept)
 
 
-def test_scaler_fit_refuses_missing_values(ctx):
-    table = pa.table({"a": [1.0, None, 3.0], "b": [1.0, 2.0, 3.0]})
-    ctx.register_record_batches("t", [table.to_batches()])
+@pytest.mark.parametrize(
+    "columns",
+    [
+        {"a": [1.0, None, 3.0], "b": [1.0, 2.0, 3.0]},
+        {"a": [1.0, None, 3.0]},
+        {"a": [1.0, None, 3.0], "b": [None, 2.0, 3.0]},
+    ],
+    ids=["one-of-two", "single-feature", "equal-null-counts"],
+)
+def test_scaler_fit_refuses_missing_values(ctx, columns):
+    ctx.register_record_batches("t", [pa.table(columns).to_batches()])
     with pytest.raises(ValueError, match="missing values are not supported"):
-        native_scaler(ctx.table("t"), ["a", "b"])
+        native_scaler(ctx.table("t"), list(columns))
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_scaler_fit_refuses_non_finite_values(ctx, bad):
+    ctx.register_record_batches("t", [[pa.record_batch({"a": [1.0, bad, 3.0]})]])
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        native_scaler(ctx.table("t"), ["a"])
+
+
+def test_scaler_fit_merge_does_not_overflow(ctx):
+    # Two partitions, 1e4 copies each of -1e150 and +1e150: M2 = 2e304 is
+    # finite, but delta^2 * n_a * n_b would be 4e308.
+    halves = [pa.record_batch({"a": np.full(10_000, sign * 1e150)}) for sign in (-1, 1)]
+    ctx.register_record_batches("t", [[half] for half in halves])
+    fitted = native_scaler(ctx.table("t"), ["a"])
+    np.testing.assert_allclose(fitted["var"], [1e300], rtol=RTOL)
+    np.testing.assert_allclose(fitted["scale"], [1e150], rtol=RTOL)
+    # The exact mean is 0; merge order leaves rounding relative to |x| = 1e150.
+    assert abs(fitted["mean"][0]) <= 1e150 * 1e-12
+
+
+def test_native_fit_refuses_chained_scalers(ctx):
+    ctx.register_record_batches("t", [[pa.record_batch({"a": [1.0, 3.0]})]])
+    scaler = {"kind": "standard_scaler", "with_mean": True, "with_std": True}
+    request = {"features": ["a"], "steps": [scaler, scaler]}
+    with pytest.raises(ValueError, match=r"steps\[1\]: a standard_scaler after"):
+        _native.fit(ctx.table("t"), json.dumps(request))
 
 
 def test_scaler_fit_refuses_empty_input(ctx):
