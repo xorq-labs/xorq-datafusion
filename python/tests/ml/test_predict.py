@@ -1,0 +1,173 @@
+import numpy as np
+import pyarrow as pa
+import pytest
+from sklearn.cluster import KMeans
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+
+import xorq_datafusion.ml as ml
+
+FEATURES = ["x0", "x1", "x2"]
+
+
+def blobs(seed=0, n_per_cluster=250):
+    rng = np.random.default_rng(seed)
+    centers = np.array(
+        [[0.0, 0.0, 0.0], [8.0, 8.0, 0.0], [0.0, 8.0, 8.0], [8.0, 0.0, 8.0]]
+    )
+    X = np.vstack([c + rng.normal(size=(n_per_cluster, 3)) for c in centers])
+    X = X[rng.permutation(len(X))]
+    init = StandardScaler().fit_transform(X)[[0, 1, 2, 3]]
+    return X, init
+
+
+def sklearn_pipeline(init, **scaler):
+    return make_pipeline(
+        StandardScaler(**scaler), KMeans(len(init), init=init, n_init=1)
+    )
+
+
+def register(ctx, X, name="t", extra=None):
+    columns = {f: X[:, j] for j, f in enumerate(FEATURES)} | (
+        extra or {"id": np.arange(len(X))}
+    )
+    table = pa.table(columns)
+    ctx.register_record_batches(
+        name, [[b] for b in table.to_batches(max_chunksize=250)]
+    )
+    return ctx.table(name)
+
+
+def labels_in_row_order(df):
+    """Labels ordered by ``id``: partitions may return rows in any order."""
+    return df.to_arrow_table().sort_by("id").column("label")
+
+
+@pytest.mark.parametrize(
+    "scaler",
+    [
+        {},
+        {"with_mean": False},
+        {"with_std": False},
+        {"with_mean": False, "with_std": False},
+    ],
+    ids=["default", "no-mean", "no-std", "neither"],
+)
+def test_predict_matches_sklearn_exactly(ctx, scaler):
+    X, init = blobs()
+    fitted = sklearn_pipeline(init, **scaler).fit(X)
+    model = ml.compile(fitted, FEATURES)
+    labels = labels_in_row_order(model.predict(register(ctx, X)))
+    assert labels.type == pa.int64()
+    np.testing.assert_array_equal(labels.to_numpy(), fitted.predict(X))
+
+
+def test_predict_after_native_fit_uses_dataframe_features(ctx):
+    X, init = blobs(1)
+    register(ctx, X)
+    df = ctx.sql("SELECT x0, x1, x2 FROM t")  # numeric columns = the features
+    fitted = ml.fit(sklearn_pipeline(init), df)
+    model = ml.compile(fitted)
+    assert model.features is None
+    out = model.predict(df).to_arrow_table()
+    X_seen = np.column_stack([out.column(f).to_numpy() for f in FEATURES])
+    np.testing.assert_array_equal(
+        out.column("label").to_numpy(), fitted.predict(X_seen)
+    )
+
+
+def test_predict_keeps_input_columns_and_rows(ctx):
+    X, init = blobs(2)
+    ids = np.arange(len(X))
+    df = register(ctx, X, extra={"id": ids, "tag": [f"r{i}" for i in ids]})
+    out = (
+        ml.compile(sklearn_pipeline(init).fit(X), FEATURES).predict(df).to_arrow_table()
+    )
+    assert out.column_names == [*FEATURES, "id", "tag", "label"]
+    assert sorted(out.column("id").to_pylist()) == ids.tolist()
+
+
+def test_predict_composes_with_sql(ctx):
+    X, init = blobs(3)
+    fitted = sklearn_pipeline(init).fit(X)
+    expected = fitted.predict(X)
+    ids = np.arange(len(X))
+    predicted = ml.compile(fitted, FEATURES).predict(
+        register(ctx, X, extra={"id": ids})
+    )
+    ctx.register_dataframe("p", predicted)
+
+    counts = ctx.sql("SELECT label, count(*) AS n FROM p GROUP BY label ORDER BY label")
+    assert (
+        counts.to_arrow_table().column("n").to_pylist()
+        == np.bincount(expected).tolist()
+    )
+
+    threes = ctx.sql("SELECT id FROM p WHERE label = 3 ORDER BY id").to_arrow_table()
+    assert threes.column("id").to_pylist() == ids[expected == 3].tolist()
+
+    ctx.register_record_batches(
+        "names",
+        [[pa.record_batch({"label": [0, 1, 2, 3], "name": ["a", "b", "c", "d"]})]],
+    )
+    joined = ctx.sql(
+        "SELECT name, count(*) AS n FROM p JOIN names USING (label) GROUP BY name ORDER BY name"
+    )
+    assert (
+        joined.to_arrow_table().column("n").to_pylist()
+        == np.bincount(expected).tolist()
+    )
+
+
+def test_predict_on_sql_dataframe(ctx):
+    X, init = blobs(4)
+    fitted = sklearn_pipeline(init).fit(X)
+    register(ctx, X)
+    df = ctx.sql("SELECT id, x0, x1, x2 FROM t WHERE x0 > 4")
+    labels = labels_in_row_order(ml.compile(fitted, FEATURES).predict(df))
+    np.testing.assert_array_equal(labels.to_numpy(), fitted.predict(X[X[:, 0] > 4]))
+
+
+def test_null_or_non_finite_features_get_null_labels(ctx):
+    X, init = blobs(5)
+    fitted = sklearn_pipeline(init).fit(X)
+    table = pa.table(
+        {
+            "x0": pa.array([0.0, None, float("nan"), 8.0], pa.float64()),
+            "x1": [0.0, 0.0, 0.0, 8.0],
+            "x2": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    ctx.register_record_batches("t", [table.to_batches()])
+    labels = ml.compile(fitted, FEATURES).predict(ctx.table("t")).to_arrow_table()
+    assert labels.column("label").to_pylist()[1:3] == [None, None]
+    assert labels.column("label").to_pylist()[0] == fitted.predict([[0.0, 0.0, 0.0]])[0]
+
+
+def test_predict_refuses_mismatched_features(ctx):
+    X, init = blobs(6)
+    fitted = sklearn_pipeline(init).fit(X)
+    df = register(ctx, X, extra={"y": X[:, 0]})
+    with pytest.raises(ValueError, match="expects 3 features, got 4"):
+        ml.compile(fitted).predict(df)
+    with pytest.raises(ValueError, match="not a column"):
+        ml.compile(fitted, ["x0", "x1", "nope"]).predict(df)
+
+
+def test_predict_refuses_existing_label_column(ctx):
+    X, init = blobs(7)
+    df = register(ctx, X, extra={"label": np.zeros(len(X))})
+    with pytest.raises(ValueError, match="already exists"):
+        ml.compile(sklearn_pipeline(init).fit(X), FEATURES).predict(df)
+
+
+def test_explain_stages(ctx):
+    X, init = blobs(8)
+    model = ml.compile(sklearn_pipeline(init).fit(X), FEATURES)
+    assert model.explain("logical").startswith("Predict: features=[x0, x1, x2]")
+    assert "__ml_nearest_centroid" in model.explain("optimized")
+    assert "Predict" not in model.explain("optimized")
+    assert "ProjectionExec" in model.explain("physical")
+    assert model.explain("parallel") == "not yet implemented"
+    with pytest.raises(ValueError, match="stage must be one of"):
+        model.explain("bogus")

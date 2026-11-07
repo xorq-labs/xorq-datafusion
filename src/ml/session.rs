@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use datafusion::execution::session_state::{SessionState, SessionStateBuilder};
 
+use super::exec::nearest_centroid::nearest_centroid_udf;
 use super::exec::welford::welford_udaf;
 use super::planner::MlQueryPlanner;
 use super::rules;
@@ -26,6 +27,10 @@ pub(crate) fn with_ml(builder: SessionStateBuilder) -> SessionStateBuilder {
         .aggregate_functions()
         .get_or_insert_with(Vec::new)
         .push(welford_udaf());
+    builder
+        .scalar_functions()
+        .get_or_insert_with(Vec::new)
+        .push(nearest_centroid_udf());
     builder
 }
 

@@ -62,3 +62,31 @@ def fit_request(ctx):
 def test_fit_plan(fit_request, stage):
     df, request = fit_request
     check(f"fit_{stage}", _native.explain_fit(df, request, stage))
+
+
+@pytest.fixture
+def predict_request():
+    # Exact fitted values, so the rendered literals are stable.
+    steps = [
+        {
+            "kind": "standard_scaler",
+            "with_mean": True,
+            "with_std": True,
+            "mean": [1.0, -2.0],
+            "var": [4.0, 0.25],
+            "scale": [2.0, 0.5],
+            "n_samples_seen": 10,
+        },
+        {
+            "kind": "kmeans",
+            "cluster_centers": [[0.0, 0.0], [1.0, -1.0]],
+            "inertia": 1.0,
+            "n_iter": 3,
+        },
+    ]
+    return json.dumps({"features": ["a", "b"], "steps": steps})
+
+
+@pytest.mark.parametrize("stage", ["logical", "fused", "optimized"])
+def test_predict_plan(predict_request, stage):
+    check(f"predict_{stage}", _native.explain_predict(predict_request, "label", stage))
