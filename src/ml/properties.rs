@@ -21,9 +21,9 @@ pub(crate) trait StepProperties {
     /// of the nearest center under `sum_j weights_j * (x_j - c_kj)^2`, ties
     /// to the lowest index.
     fn nearest_centroid(&self) -> Option<(&[Vec<f64>], &[f64])>;
-    /// Per-feature `(low, high)` outside which the step labels a row null;
-    /// empty when only null and non-finite features are.
-    fn input_bounds(&self) -> &[(f64, f64)];
+    /// Per-feature `(shift, scale)` guards: the step labels a row null when
+    /// `(x - shift) / scale` is not finite. Empty: no guards.
+    fn input_guards(&self) -> &[(f64, f64)];
     /// The step's output is a linear (affine) function of its input.
     fn is_linear(&self) -> bool;
     /// The step's output for a row depends on that row alone.
@@ -42,9 +42,11 @@ pub(crate) enum PredictStep {
     NearestCentroid {
         centers: Vec<Vec<f64>>,
         weights: Vec<f64>,
-        /// Per-feature `(low, high)`: rows with a feature outside it get a
-        /// null label. Empty: every finite row is labelled.
-        bounds: Vec<(f64, f64)>,
+        /// Per-feature `(shift, scale)` of an affine step folded into this
+        /// one: a row whose `(x - shift) / scale` is not finite (where the
+        /// unfolded plan would label null) gets a null label. Empty: every
+        /// finite row is labelled.
+        guards: Vec<(f64, f64)>,
     },
 }
 
@@ -74,7 +76,7 @@ impl PredictStep {
             } => PredictStep::NearestCentroid {
                 centers: cluster_centers.clone(),
                 weights: vec![1.0; n_features],
-                bounds: vec![],
+                guards: vec![],
             },
         }
     }
@@ -90,17 +92,13 @@ impl PredictStep {
             PredictStep::NearestCentroid {
                 centers,
                 weights,
-                bounds,
+                guards,
             } => {
                 let mut all: Vec<u64> = centers.iter().flat_map(|c| bits(c)).collect();
                 all.push(centers.len() as u64);
                 all.extend(bits(weights));
-                all.push(bounds.len() as u64);
-                all.extend(
-                    bounds
-                        .iter()
-                        .flat_map(|(lo, hi)| [lo.to_bits(), hi.to_bits()]),
-                );
+                all.push(guards.len() as u64);
+                all.extend(guards.iter().flat_map(|(s, a)| [s.to_bits(), a.to_bits()]));
                 (1, all)
             }
         }
@@ -136,19 +134,17 @@ impl fmt::Display for PredictStep {
             PredictStep::NearestCentroid {
                 centers,
                 weights,
-                bounds,
+                guards,
             } => {
                 let d = weights.len();
                 let weighted = weights.iter().any(|w| *w != 1.0);
-                let bounded = bounds
-                    .iter()
-                    .any(|(lo, hi)| lo.is_finite() || hi.is_finite());
+                let guarded = !guards.is_empty();
                 write!(
                     f,
                     "nearest_centroid(k={}, d={d}{}{})",
                     centers.len(),
                     if weighted { ", weighted" } else { "" },
-                    if bounded { ", bounded" } else { "" }
+                    if guarded { ", guarded" } else { "" }
                 )
             }
         }
@@ -172,9 +168,9 @@ impl StepProperties for PredictStep {
         }
     }
 
-    fn input_bounds(&self) -> &[(f64, f64)] {
+    fn input_guards(&self) -> &[(f64, f64)] {
         match self {
-            PredictStep::NearestCentroid { bounds, .. } => bounds,
+            PredictStep::NearestCentroid { guards, .. } => guards,
             PredictStep::DiagonalAffine { .. } => &[],
         }
     }

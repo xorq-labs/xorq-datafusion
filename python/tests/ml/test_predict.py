@@ -1,3 +1,4 @@
+import sys
 import time
 
 import numpy as np
@@ -230,7 +231,7 @@ def test_fusion_is_skipped_when_it_would_change_labels(
 def test_fusion_applies_to_a_fitted_model():
     X, init = blobs(9)
     model = ml.compile(sklearn_pipeline(init).fit(X), FEATURES)
-    assert "nearest_centroid(k=4, d=3, weighted)" in fused_plan(model)
+    assert "nearest_centroid(k=4, d=3, weighted, guarded)" in fused_plan(model)
 
 
 def test_fusion_check_is_fast_for_many_centers():
@@ -242,7 +243,7 @@ def test_fusion_check_is_fast_for_many_centers():
     start = time.monotonic()
     plan = fused_plan(model)
     assert time.monotonic() - start < 5
-    assert f"nearest_centroid(k={k}, d={d}, weighted)" in plan
+    assert f"nearest_centroid(k={k}, d={d}, weighted, guarded)" in plan
 
 
 def test_fusion_check_falls_back_to_pairs():
@@ -250,7 +251,7 @@ def test_fusion_check_falls_back_to_pairs():
     # check (within the work cap) does.
     centers = np.random.default_rng(1).normal(size=(500, 32))
     plan = fused_plan(model_from([0.5] * 32, [2.0] * 32, centers.tolist()))
-    assert "nearest_centroid(k=500, d=32, weighted)" in plan
+    assert "nearest_centroid(k=500, d=32, weighted, guarded)" in plan
 
 
 def test_fusion_check_gives_up_rather_than_planning_slowly():
@@ -276,3 +277,17 @@ def test_fused_predict_nulls_rows_whose_unfused_transform_overflows(ctx):
     ctx.register_record_batches("t", [[pa.record_batch({"x0": xs, "id": range(4)})]])
     labels = labels_in_row_order(model.predict(ctx.table("t"))).to_pylist()
     assert labels == [None, None, 0, 1]
+
+
+def test_fused_guard_matches_unfused_overflow_at_the_edge(ctx):
+    # One center, all parameters inside the safe domain. x is the rounded
+    # endpoint s + MAX * a: a precomputed bound admitted it, but the unfused
+    # (x - s) / a overflows there, so the label must be null.
+    s, a = 2.0**470, 2.0**-500
+    model = model_from([s], [a], [[0.0]])
+    assert "guarded" in fused_plan(model)
+    edge = s + sys.float_info.max * a
+    xs = [edge, s]
+    ctx.register_record_batches("t", [[pa.record_batch({"x0": xs, "id": [0, 1]})]])
+    labels = labels_in_row_order(model.predict(ctx.table("t"))).to_pylist()
+    assert labels == [None, 0]
