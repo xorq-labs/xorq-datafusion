@@ -73,3 +73,5 @@ docs/_build/
 
 # Local notes and experiments
 /.scratch/
+.kata.local.toml
+.claude
