@@ -621,8 +621,10 @@ const SIGNAL_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 /// seen: the wait is a plain channel timeout on the calling thread, not a
 /// future polled beside `f` (a stream that never returns `Pending` starved
 /// that) nor a tokio timer (busy workers starve the timer driver). Aborting
-/// takes effect at the task's next yield point. Signals are only delivered
-/// on the main thread, so a call from another thread waits like
+/// takes effect at the task's next yield point. Called from a runtime
+/// worker, the wait runs inside `block_in_place`, so the worker's core keeps
+/// serving tasks (including this one). Signals are only delivered on the
+/// main thread, so a call from another thread waits like
 /// [`wait_for_future`].
 ///
 /// Used by ML entry points only; existing callers keep [`wait_for_future`].
@@ -636,28 +638,38 @@ where
         // The receiver is gone only when the caller already returned.
         let _ = sender.send(f.await);
     });
-    let mut receiver = receiver;
-    loop {
-        // Moved in and out: a `Receiver` is `Send` but not `Sync`.
-        let (back, waited) = py.detach(move || {
-            let waited = receiver.recv_timeout(SIGNAL_CHECK_INTERVAL);
-            (receiver, waited)
-        });
-        receiver = back;
-        match waited {
-            Ok(output) => return Ok(output),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if let Err(signal) = py.check_signals() {
-                    task.abort();
-                    return Err(signal);
+    let wait = move || -> PyResult<F::Output> {
+        let mut receiver = receiver;
+        loop {
+            // Moved in and out: a `Receiver` is `Send` but not `Sync`.
+            let (back, waited) = py.detach(move || {
+                let waited = receiver.recv_timeout(SIGNAL_CHECK_INTERVAL);
+                (receiver, waited)
+            });
+            receiver = back;
+            match waited {
+                Ok(output) => return Ok(output),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Err(signal) = py.check_signals() {
+                        task.abort();
+                        return Err(signal);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "ML task ended without a result (it panicked or the runtime shut down)",
+                    ));
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "ML task ended without a result (it panicked or the runtime shut down)",
-                ));
-            }
         }
+    };
+    match Handle::try_current() {
+        // Called on a runtime worker (a Python UDF or provider re-entering an
+        // ML entry point): hand the worker's core back first, as
+        // `wait_for_future` does, or the spawned task may have no worker to
+        // run on (one worker, or every worker waiting like this one).
+        Ok(_) => tokio::task::block_in_place(wait),
+        Err(_) => wait(),
     }
 }
 

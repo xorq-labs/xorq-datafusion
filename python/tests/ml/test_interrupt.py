@@ -34,3 +34,15 @@ def test_ml_execution_is_interruptible(mode, delay, partitions):
     assert out[0].startswith("interrupted "), out
     assert float(out[0].split()[1]) < DEADLINE
     assert out[1] == "after 42"
+
+
+def test_ml_entry_point_reentered_on_one_worker():
+    child = Path(__file__).with_name("_reentrant_ml_child.py")
+    out = subprocess.run(
+        [sys.executable, str(child)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    ).stdout
+    assert out.strip() == "rows 3"
