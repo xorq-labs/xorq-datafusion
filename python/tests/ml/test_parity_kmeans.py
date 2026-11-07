@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -7,6 +9,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 import xorq_datafusion.ml as ml
+from xorq_datafusion._internal import ml as _native
 
 RTOL, ATOL = 1e-7, 1e-9
 N_PARTITIONS = 4
@@ -98,3 +101,32 @@ def test_kmeans_fit_on_a_single_shot_reader(ctx):
     np.testing.assert_allclose(
         fitted[1].cluster_centers_, expected[1].cluster_centers_, rtol=RTOL, atol=ATOL
     )
+
+
+@pytest.mark.parametrize("tol", [0.0, 1e-4], ids=["tol0", "default-tol"])
+@pytest.mark.parametrize(
+    ("values", "match"),
+    [
+        ([0.0, None, 2.0], "missing values"),
+        ([0.0, float("nan"), 2.0], "NaN or infinite"),
+    ],
+    ids=["null", "nan"],
+)
+def test_kmeans_only_fit_validates_its_input(ctx, tol, values, match):
+    ctx.register_record_batches(
+        "t", [[pa.record_batch({"x": pa.array(values, pa.float64())})]]
+    )
+    request = {
+        "features": ["x"],
+        "steps": [
+            {
+                "kind": "kmeans",
+                "n_clusters": 1,
+                "init": [[0.0]],
+                "max_iter": 10,
+                "tol": tol,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match=match):
+        _native.fit(ctx.table("t"), json.dumps(request))

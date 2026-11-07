@@ -169,26 +169,28 @@ fn transform_plan(
     LogicalPlanBuilder::from(input).project(exprs)?.build()
 }
 
-/// scikit-learn's `_tolerance`: `tol` times the mean feature variance of the
-/// KMeans input, or 0 when `tol` is 0.
-async fn absolute_tolerance(
+/// Check the KMeans input (no missing or non-finite values; the same
+/// single-pass aggregate as the scaler fit, run whatever `tol` is) and
+/// return scikit-learn's `_tolerance`: `tol` times its mean feature
+/// variance, or 0 when `tol` is 0.
+async fn validate_and_tolerance(
     state: &SessionState,
     input: &LogicalPlan,
-    n_features: usize,
+    features: &[String],
     tol: f64,
 ) -> Result<f64> {
-    if tol == 0.0 {
-        return Ok(0.0);
-    }
-    let names: Vec<String> = (0..n_features).map(kmeans::x).collect();
+    let names: Vec<String> = (0..features.len()).map(kmeans::x).collect();
     let plan = scaler_fit_plan(input.clone(), &names)?;
     let batches = DataFrame::new(state.clone(), plan).collect().await?;
     let FittedStep::StandardScaler { var: Some(var), .. } =
-        read_scaler(&batches, &names, true, true)?
+        read_scaler(&batches, features, true, true)?
     else {
         return plan_err!("variance of the KMeans input is missing");
     };
-    Ok(tol * var.iter().sum::<f64>() / n_features as f64)
+    if tol == 0.0 {
+        return Ok(0.0);
+    }
+    Ok(tol * var.iter().sum::<f64>() / features.len() as f64)
 }
 
 /// `input`'s feature columns, read from the source exactly once: a fit with
@@ -230,7 +232,7 @@ async fn prepare_kmeans(
     let batches = DataFrame::new(state.clone(), projected).collect().await?;
     let partitions = state.config().target_partitions();
     let materialized = kmeans::materialized_input(batches, partitions)?;
-    let tol = absolute_tolerance(state, &materialized, features.len(), tol).await?;
+    let tol = validate_and_tolerance(state, &materialized, features, tol).await?;
     let plan = kmeans::kmeans_fit_plan(materialized.clone(), init, max_iter, tol)?;
     Ok((materialized, plan))
 }
