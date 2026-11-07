@@ -12,6 +12,8 @@ use datafusion::prelude::SessionConfig;
 use crate::context::{PySessionConfig, PySessionContext};
 use crate::dataframe::PyDataFrame;
 use crate::errors::from_datafusion_error;
+use crate::utils::wait_for_future_interruptible;
+use datafusion::arrow::pyarrow::ToPyArrow;
 
 use super::session::has_ml;
 use super::spec::{CompileRequest, FitRequest, FitResult};
@@ -60,6 +62,19 @@ fn validate_compile_request(json: &str) -> PyResult<String> {
     to_json(&CompileRequest::from_json(json).map_err(to_py_err)?)
 }
 
+/// Collect `df` the way ML entry points execute plans: through
+/// `wait_for_future_interruptible`, so Ctrl-C cancels the query and raises
+/// `KeyboardInterrupt`.
+#[pyfunction]
+fn _collect_interruptible<'py>(
+    py: Python<'py>,
+    df: &PyDataFrame,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let batches = wait_for_future_interruptible(py, df.df.as_ref().clone().collect())?
+        .map_err(from_datafusion_error)?;
+    batches.into_iter().map(|rb| rb.to_pyarrow(py)).collect()
+}
+
 /// Test support: a `SessionContext` built exactly as `SessionContext(config)`
 /// builds one, minus `with_ml`. Lets tests prove `with_ml` is inert.
 #[pyfunction]
@@ -83,6 +98,7 @@ pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(validate_fit_request))?;
     m.add_wrapped(wrap_pyfunction!(validate_fit_result))?;
     m.add_wrapped(wrap_pyfunction!(validate_compile_request))?;
+    m.add_wrapped(wrap_pyfunction!(_collect_interruptible))?;
     m.add_wrapped(wrap_pyfunction!(_session_context_without_ml))?;
     Ok(())
 }

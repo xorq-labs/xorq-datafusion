@@ -606,6 +606,45 @@ where
         Err(_) => handle.block_on(f),
     })
 }
+/// How often [`wait_for_future_interruptible`] checks for Python signals.
+const SIGNAL_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Like [`wait_for_future`], but a pending Python signal (Ctrl-C) aborts the
+/// wait: every [`SIGNAL_CHECK_INTERVAL`] the GIL is reattached briefly and
+/// `check_signals` runs; when it raises, `f` is dropped, which cancels it, and
+/// the signal's exception (e.g. `KeyboardInterrupt`) is returned.
+///
+/// `f` is driven directly, never spawned. A caller that must spawn has to
+/// `abort()` the `JoinHandle` itself: dropping one does not cancel the task.
+/// Signals are only delivered on the main thread, so a call from another
+/// thread waits like [`wait_for_future`].
+///
+/// Used by ML entry points only; existing callers keep [`wait_for_future`].
+pub(crate) fn wait_for_future_interruptible<F>(py: Python, f: F) -> PyResult<F::Output>
+where
+    F: Send + Future,
+    F::Output: Send,
+{
+    let handle = get_tokio_handle();
+    let raced = async move {
+        tokio::pin!(f);
+        let mut ticks = tokio::time::interval(SIGNAL_CHECK_INTERVAL);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                out = &mut f => return Ok(out),
+                _ = ticks.tick() => Python::attach(|py| py.check_signals())?,
+            }
+        }
+    };
+    py.detach(|| match Handle::try_current() {
+        // Re-entered from inside the runtime: see `wait_for_future`.
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(raced)),
+        Err(_) => handle.block_on(raced),
+    })
+}
+
 pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionError> {
     Ok(match value {
         "immutable" => Volatility::Immutable,
