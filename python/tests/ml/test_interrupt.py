@@ -9,13 +9,23 @@ DEADLINE = 2.0
 
 
 # kmeans: signal after 3 s, once the input is materialized and IterateExec
-# is looping.
+# is looping. One partition is the case CI hit: the plan has no repartition
+# channels, so its stream never yields, and a signal check that waited for
+# it to yield never ran.
 @pytest.mark.parametrize(
-    ("mode", "delay"), [("ml", 0.5), ("fit", 0.5), ("kmeans", 3.0)]
+    ("mode", "delay", "partitions"),
+    [
+        ("ml", 0.5, 1),
+        ("ml", 0.5, 4),
+        ("fit", 0.5, 1),
+        ("fit", 0.5, 4),
+        ("kmeans", 3.0, 1),
+        ("kmeans", 3.0, 4),
+    ],
 )
-def test_ml_execution_is_interruptible(mode, delay):
+def test_ml_execution_is_interruptible(mode, delay, partitions):
     out = subprocess.run(
-        [sys.executable, str(CHILD), mode, str(delay)],
+        [sys.executable, str(CHILD), mode, str(delay), str(partitions)],
         capture_output=True,
         text=True,
         timeout=60,

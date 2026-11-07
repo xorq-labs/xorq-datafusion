@@ -81,7 +81,11 @@ fn fit(py: Python, df: &PyDataFrame, request: &str) -> PyResult<String> {
     ensure_ml_session(df)?;
     let request = FitRequest::from_json(request).map_err(to_py_err)?;
     let (state, plan) = df.df.as_ref().clone().into_parts();
-    let result = wait_for_future_interruptible(py, super::fit::fit(state, plan, &request))?
+    let result =
+        wait_for_future_interruptible(
+            py,
+            async move { super::fit::fit(state, plan, &request).await },
+        )?
         .map_err(to_py_err)?;
     to_json(&result)
 }
@@ -93,10 +97,10 @@ fn explain_fit(py: Python, df: &PyDataFrame, request: &str, stage: &str) -> PyRe
     ensure_ml_session(df)?;
     let request = FitRequest::from_json(request).map_err(to_py_err)?;
     let (state, input) = df.df.as_ref().clone().into_parts();
-    let plan = wait_for_future_interruptible(
-        py,
-        super::fit::kmeans_fit_plan_for(state.clone(), input, &request),
-    )?
+    let plan = wait_for_future_interruptible(py, {
+        let state = state.clone();
+        async move { super::fit::kmeans_fit_plan_for(state, input, &request).await }
+    })?
     .map_err(to_py_err)?;
     let plan = match stage {
         "logical" => plan,
@@ -176,8 +180,11 @@ fn explain_predict(py: Python, request: &str, output: &str, stage: &str) -> PyRe
             .display_indent()
             .to_string(),
         "physical" => {
-            let physical = wait_for_future_interruptible(py, state.create_physical_plan(&plan))?
-                .map_err(to_py_err)?;
+            let physical = wait_for_future_interruptible(py, {
+                let (state, plan) = (state.clone(), plan.clone());
+                async move { state.create_physical_plan(&plan).await }
+            })?
+            .map_err(to_py_err)?;
             let rendered = displayable(physical.as_ref()).indent(false).to_string();
             rendered
         }

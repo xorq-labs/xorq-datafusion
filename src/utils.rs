@@ -610,39 +610,55 @@ where
 const SIGNAL_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Like [`wait_for_future`], but a pending Python signal (Ctrl-C) aborts the
-/// wait: every [`SIGNAL_CHECK_INTERVAL`] the GIL is reattached briefly and
-/// `check_signals` runs; when it raises, `f` is dropped, which cancels it, and
-/// the signal's exception (e.g. `KeyboardInterrupt`) is returned.
+/// wait: `f` runs as a task on the runtime and sends its output over a
+/// channel; the calling thread waits on that channel and, every
+/// [`SIGNAL_CHECK_INTERVAL`], reattaches the GIL briefly to run
+/// `check_signals`. When that raises, the task is `abort()`ed (dropping a
+/// `JoinHandle` would not cancel it) and the signal's exception (e.g.
+/// `KeyboardInterrupt`) is returned at once.
 ///
-/// `f` is driven directly, never spawned. A caller that must spawn has to
-/// `abort()` the `JoinHandle` itself: dropping one does not cancel the task.
-/// Signals are only delivered on the main thread, so a call from another
-/// thread waits like [`wait_for_future`].
+/// Neither the task nor the runtime has to cooperate for the signal to be
+/// seen: the wait is a plain channel timeout on the calling thread, not a
+/// future polled beside `f` (a stream that never returns `Pending` starved
+/// that) nor a tokio timer (busy workers starve the timer driver). Aborting
+/// takes effect at the task's next yield point. Signals are only delivered
+/// on the main thread, so a call from another thread waits like
+/// [`wait_for_future`].
 ///
 /// Used by ML entry points only; existing callers keep [`wait_for_future`].
 pub(crate) fn wait_for_future_interruptible<F>(py: Python, f: F) -> PyResult<F::Output>
 where
-    F: Send + Future,
-    F::Output: Send,
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
 {
-    let handle = get_tokio_handle();
-    let raced = async move {
-        tokio::pin!(f);
-        let mut ticks = tokio::time::interval(SIGNAL_CHECK_INTERVAL);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select! {
-                biased;
-                out = &mut f => return Ok(out),
-                _ = ticks.tick() => Python::attach(|py| py.check_signals())?,
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let task = get_tokio_handle().spawn(async move {
+        // The receiver is gone only when the caller already returned.
+        let _ = sender.send(f.await);
+    });
+    let mut receiver = receiver;
+    loop {
+        // Moved in and out: a `Receiver` is `Send` but not `Sync`.
+        let (back, waited) = py.detach(move || {
+            let waited = receiver.recv_timeout(SIGNAL_CHECK_INTERVAL);
+            (receiver, waited)
+        });
+        receiver = back;
+        match waited {
+            Ok(output) => return Ok(output),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(signal) = py.check_signals() {
+                    task.abort();
+                    return Err(signal);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "ML task ended without a result (it panicked or the runtime shut down)",
+                ));
             }
         }
-    };
-    py.detach(|| match Handle::try_current() {
-        // Re-entered from inside the runtime: see `wait_for_future`.
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(raced)),
-        Err(_) => handle.block_on(raced),
-    })
+    }
 }
 
 pub(crate) fn parse_volatility(value: &str) -> Result<Volatility, DataFusionError> {

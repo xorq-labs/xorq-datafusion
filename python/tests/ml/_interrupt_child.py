@@ -3,7 +3,7 @@
 Runs a slow plan through an ML execution path, sends SIGINT to itself from a
 timer thread after ``DELAY`` seconds, and prints how long after the signal
 the KeyboardInterrupt arrived, then whether the runtime still runs queries.
-Usage: python _interrupt_child.py <collect | ml | fit | kmeans>
+Usage: python _interrupt_child.py <collect | ml | fit | kmeans> [delay] [partitions]
 """
 
 import json
@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from xorq_datafusion import SessionContext
+from xorq_datafusion import SessionConfig, SessionContext
 from xorq_datafusion._internal import ml
 
 DELAY = 0.5
@@ -49,8 +49,8 @@ SLOW = (
 )
 
 
-def main(mode, delay):
-    ctx = SessionContext()
+def main(mode, delay, partitions):
+    ctx = SessionContext(config=SessionConfig().with_target_partitions(partitions))
     df = ctx.sql(SLOW)
     runs = {
         "collect": df.collect,
@@ -77,4 +77,8 @@ def main(mode, delay):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], float(sys.argv[2]) if len(sys.argv) > 2 else DELAY)
+    main(
+        sys.argv[1],
+        float(sys.argv[2]) if len(sys.argv) > 2 else DELAY,
+        int(sys.argv[3]) if len(sys.argv) > 3 else os.cpu_count(),
+    )
