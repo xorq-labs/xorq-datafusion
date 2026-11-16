@@ -40,8 +40,23 @@ struct TokioRuntime;
 
 #[pymethods]
 impl TokioRuntime {
-    fn shutdown(&self, timeout_secs: Option<u64>) {
-        crate::utils::shutdown_runtime(timeout_secs);
+    /// Stop pull threads from entering Python, wait up to `pull_timeout_secs`
+    /// for the ones already inside to return, then shut the runtime down
+    /// (waiting up to `timeout_secs`, or not at all when `None`).
+    ///
+    /// Returns `False` when some pull was still inside Python at the deadline.
+    /// Every later scan of a Python-backed table fails: this is meant for
+    /// interpreter exit.
+    #[pyo3(signature = (timeout_secs=None, pull_timeout_secs=5.0))]
+    fn shutdown(&self, py: Python, timeout_secs: Option<u64>, pull_timeout_secs: f64) -> bool {
+        // GIL released for both waits: an in-flight pull needs it to finish.
+        py.detach(|| {
+            let quiesced = crate::utils::quiesce_python_pulls(std::time::Duration::from_secs_f64(
+                pull_timeout_secs.max(0.0),
+            ));
+            crate::utils::shutdown_runtime(timeout_secs);
+            quiesced
+        })
     }
 }
 

@@ -36,9 +36,22 @@ except ModuleNotFoundError:
     import importlib_metadata
 
 
-def close(timeout_secs=None):
-    """Shut down the background runtime, waiting up to ``timeout_secs``."""
-    _runtime.shutdown(timeout_secs)
+def close(timeout_secs=None, pull_timeout_secs=5.0):
+    """
+    Shut down the background runtime, waiting up to ``timeout_secs``.
+
+    Runs at interpreter exit. Before the runtime goes, reader threads are
+    stopped from calling into Python, and those already inside a Python
+    reader get up to ``pull_timeout_secs`` to return: one still inside when
+    the interpreter finalizes would crash the process.
+
+    Returns
+    -------
+    bool
+        ``False`` when some reader was still running at that deadline.
+
+    """
+    return _runtime.shutdown(timeout_secs, pull_timeout_secs)
 
 
 atexit.register(close)
