@@ -164,3 +164,19 @@ def test_close_returns_true_when_pulls_finish():
     )
     assert code == 0, err
     assert out.split() == ["2", "True"]
+
+
+@pytest.mark.parametrize(
+    "pull_timeout_secs", ['float("inf")', 'float("nan")', "-1.0", "None"]
+)
+def test_close_accepts_any_pull_timeout(pull_timeout_secs):
+    """inf waits without limit; NaN, negatives and None do not wait; none panic."""
+    code, out, err = _run(
+        _PARKED_PULL_AT_EXIT.format(delay=0.05)
+        + f"""
+    xdf.close(pull_timeout_secs={pull_timeout_secs})
+    print("closed")
+"""
+    )
+    assert code == 0, err
+    assert out.split()[-1] == "closed"

@@ -123,23 +123,20 @@ struct GateState {
     in_flight: usize,
 }
 
-fn python_gate() -> &'static PythonGate {
-    static GATE: OnceLock<PythonGate> = OnceLock::new();
-    GATE.get_or_init(|| PythonGate {
-        state: std::sync::Mutex::new(GateState {
-            closed: false,
-            in_flight: 0,
-        }),
-        idle: std::sync::Condvar::new(),
-    })
-}
+static PYTHON_GATE: PythonGate = PythonGate {
+    state: std::sync::Mutex::new(GateState {
+        closed: false,
+        in_flight: 0,
+    }),
+    idle: std::sync::Condvar::new(),
+};
 
 /// Permission to be inside Python on a pull thread; returned on drop.
 struct GateTicket;
 
 impl Drop for GateTicket {
     fn drop(&mut self) {
-        let gate = python_gate();
+        let gate = &PYTHON_GATE;
         let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
         state.in_flight -= 1;
         if state.in_flight == 0 {
@@ -150,10 +147,7 @@ impl Drop for GateTicket {
 
 /// A ticket, or `None` once [`quiesce_python_pulls`] has closed the gate.
 fn enter_python() -> Option<GateTicket> {
-    let mut state = python_gate()
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut state = PYTHON_GATE.state.lock().unwrap_or_else(|e| e.into_inner());
     if state.closed {
         return None;
     }
@@ -161,10 +155,10 @@ fn enter_python() -> Option<GateTicket> {
     Some(GateTicket)
 }
 
-fn interpreter_shutting_down() -> datafusion_common::DataFusionError {
+fn runtime_closed() -> datafusion_common::DataFusionError {
     datafusion_common::DataFusionError::Execution(
-        "the Python interpreter is shutting down; the stream was stopped before \
-         its next pull"
+        "xorq_datafusion was closed (by `close()` or at interpreter exit); \
+         Python-backed streams stop before their next pull"
             .to_string(),
     )
 }
@@ -179,21 +173,53 @@ fn dispose_pull(pull: BatchPull) {
     }
 }
 
-/// Close the gate and wait up to `timeout` for every pull already inside Python
-/// to return. Returns `false` if some are still running at the deadline (a pull
-/// blocked on something that never comes); those can still take the process
-/// down at finalization, as before.
+/// A pull that goes through [`dispose_pull`] however it is dropped: normally,
+/// by an unwind out of the pull, or inside a closure the runtime discards
+/// without running (a `spawn_blocking` refused during shutdown).
+struct GatedPull(Option<BatchPull>);
+
+impl GatedPull {
+    fn get(&mut self) -> &mut BatchPull {
+        self.0.as_mut().expect("pull is present until into_inner")
+    }
+
+    fn into_inner(mut self) -> BatchPull {
+        self.0.take().expect("pull is present until into_inner")
+    }
+}
+
+impl Drop for GatedPull {
+    fn drop(&mut self) {
+        if let Some(pull) = self.0.take() {
+            dispose_pull(pull);
+        }
+    }
+}
+
+/// Close the gate and wait up to `timeout` (`None`: no limit) for every pull
+/// already inside Python to return. Returns `false` if some are still running at
+/// the deadline (a pull blocked on something that never comes); those can still
+/// take the process down at finalization, as before.
 ///
 /// Must be called with the GIL released: the pulls being waited on need it to
 /// finish.
-pub fn quiesce_python_pulls(timeout: std::time::Duration) -> bool {
-    let gate = python_gate();
+pub fn quiesce_python_pulls(timeout: Option<std::time::Duration>) -> bool {
+    let gate = &PYTHON_GATE;
     let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
     state.closed = true;
-    let (state, _) = gate
-        .idle
-        .wait_timeout_while(state, timeout, |s| s.in_flight > 0)
-        .unwrap_or_else(|e| e.into_inner());
+    let busy = |s: &mut GateState| s.in_flight > 0;
+    let state = match timeout {
+        Some(timeout) => {
+            gate.idle
+                .wait_timeout_while(state, timeout, busy)
+                .unwrap_or_else(|e| e.into_inner())
+                .0
+        }
+        None => gate
+            .idle
+            .wait_while(state, busy)
+            .unwrap_or_else(|e| e.into_inner()),
+    };
     state.in_flight == 0
 }
 
@@ -249,15 +275,19 @@ impl PullGuard {
 impl Drop for PullGuard {
     fn drop(&mut self) {
         let Some(pull) = self.0.take() else { return };
+        // Gated however the closure ends: a runtime that is shutting down drops
+        // a refused `spawn_blocking` closure on this (worker) thread unrun; the
+        // gate is closed by then, so the pull is leaked, not destroyed here.
+        let pull = GatedPull(Some(pull));
         match Handle::try_current() {
             // Detached on purpose: disposal must not depend on this task being
             // polled again -- it usually runs from a drop/abort.
             Ok(handle) => {
-                handle.spawn_blocking(move || dispose_pull(pull));
+                handle.spawn_blocking(move || drop(pull));
             }
             // No runtime context (e.g. after shutdown_runtime): there is nowhere
             // to hand it to, so drop it here.
-            Err(_) => dispose_pull(pull),
+            Err(_) => drop(pull),
         }
     }
 }
@@ -361,13 +391,15 @@ impl PullHost {
                 let demand = Arc::clone(demand);
                 let schema = Arc::clone(schema);
                 let joined = tokio::task::spawn_blocking(move || {
-                    let mut pull = pull;
+                    // Gated from the start, so a panic out of the pull (or a
+                    // closure dropped unrun) still disposes it through the gate.
+                    let mut pull = GatedPull(Some(pull));
                     let _credit = credit;
-                    let ended = drain_batches(&mut pull, permit, &demand, read_ahead, &schema);
+                    let ended = drain_batches(pull.get(), permit, &demand, read_ahead, &schema);
                     // Guarded on the way back too: if this task was aborted, the
                     // runtime drops the output, and the pull must still be
                     // disposed through `dispose_pull`.
-                    (ended, PullGuard::new(pull))
+                    (ended, PullGuard::new(pull.into_inner()))
                 })
                 .await;
                 match joined {
@@ -616,7 +648,7 @@ fn drain_batches(
         // Every pull may enter Python, so it goes through the gate: once the
         // interpreter starts shutting down, end the stream instead.
         let Some(entered) = enter_python() else {
-            permit.send(Err(interpreter_shutting_down()));
+            permit.send(Err(runtime_closed()));
             return true;
         };
         let pulled = pull();

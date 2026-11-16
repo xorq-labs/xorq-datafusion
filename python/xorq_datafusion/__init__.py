@@ -36,14 +36,15 @@ except ModuleNotFoundError:
     import importlib_metadata
 
 
-def close(timeout_secs=None, pull_timeout_secs=5.0):
+def close(timeout_secs=None, pull_timeout_secs=2.0):
     """
     Shut down the background runtime, waiting up to ``timeout_secs``.
 
     Runs at interpreter exit. Before the runtime goes, reader threads are
     stopped from calling into Python, and those already inside a Python
     reader get up to ``pull_timeout_secs`` to return: one still inside when
-    the interpreter finalizes would crash the process.
+    the interpreter finalizes would crash the process. ``None`` skips that
+    wait; ``float("inf")`` waits without limit.
 
     Returns
     -------

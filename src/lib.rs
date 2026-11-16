@@ -42,18 +42,29 @@ struct TokioRuntime;
 impl TokioRuntime {
     /// Stop pull threads from entering Python, wait up to `pull_timeout_secs`
     /// for the ones already inside to return, then shut the runtime down
-    /// (waiting up to `timeout_secs`, or not at all when `None`).
+    /// (waiting up to `timeout_secs`). For both, `None` means do not wait;
+    /// `pull_timeout_secs` also takes `inf` for no limit. The default lives in
+    /// the Python `close()`.
     ///
     /// Returns `False` when some pull was still inside Python at the deadline.
     /// Every later scan of a Python-backed table fails: this is meant for
     /// interpreter exit.
-    #[pyo3(signature = (timeout_secs=None, pull_timeout_secs=5.0))]
-    fn shutdown(&self, py: Python, timeout_secs: Option<u64>, pull_timeout_secs: f64) -> bool {
+    #[pyo3(signature = (timeout_secs=None, pull_timeout_secs=None))]
+    fn shutdown(
+        &self,
+        py: Python,
+        timeout_secs: Option<u64>,
+        pull_timeout_secs: Option<f64>,
+    ) -> bool {
+        // NaN and negatives mean no wait; too large for a Duration (inf) means no
+        // limit.
+        let pull_timeout = match pull_timeout_secs {
+            None => Some(std::time::Duration::ZERO),
+            Some(secs) => std::time::Duration::try_from_secs_f64(secs.max(0.0)).ok(),
+        };
         // GIL released for both waits: an in-flight pull needs it to finish.
         py.detach(|| {
-            let quiesced = crate::utils::quiesce_python_pulls(std::time::Duration::from_secs_f64(
-                pull_timeout_secs.max(0.0),
-            ));
+            let quiesced = crate::utils::quiesce_python_pulls(pull_timeout);
             crate::utils::shutdown_runtime(timeout_secs);
             quiesced
         })
