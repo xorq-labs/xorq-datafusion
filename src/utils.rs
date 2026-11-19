@@ -795,7 +795,16 @@ where
         let result = (inner)(&args);
         if is_scalar {
             // If all inputs are scalar, keeps output as scalar
-            let result = result.and_then(|arr| ScalarValue::try_from_array(&arr, 0));
+            // try_from_array indexes without a bounds check, so an empty
+            // result from the callback would panic.
+            let result = result.and_then(|arr| {
+                if arr.is_empty() {
+                    return datafusion_common::exec_err!(
+                        "scalar function returned an empty array for scalar arguments"
+                    );
+                }
+                ScalarValue::try_from_array(&arr, 0)
+            });
             result.map(ColumnarValue::Scalar)
         } else {
             result.map(ColumnarValue::Array)

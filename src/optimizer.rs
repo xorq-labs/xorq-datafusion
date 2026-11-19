@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::errors::to_external_err;
+use crate::errors::{from_datafusion_error, to_external_err};
 use crate::sql::logical::PyLogicalPlan;
 use datafusion_common::tree_node::Transformed;
 use datafusion_common::DataFusionError;
@@ -35,9 +35,6 @@ pub struct PyOptimizerRule {
     pub(crate) rule: Py<PyAny>,
 }
 
-unsafe impl Send for PyOptimizerRule {}
-unsafe impl Sync for PyOptimizerRule {}
-
 #[pymethods]
 impl PyOptimizerRule {
     #[new]
@@ -69,13 +66,11 @@ impl OptimizerRule for PyOptimizerRule {
                 .bind(py)
                 .call_method1("try_optimize", (py_plan,))
                 .map_err(to_external_err)?;
+            let py_plan = py_plan
+                .extract::<PyLogicalPlan>()
+                .map_err(|e| to_external_err(e.into()))?;
             Ok(Transformed::new_transformed(
-                py_plan
-                    .extract::<PyLogicalPlan>()
-                    .unwrap()
-                    .plan
-                    .as_ref()
-                    .clone(),
+                py_plan.plan.as_ref().clone(),
                 true,
             ))
         })
@@ -102,13 +97,16 @@ impl PyOptimizerContext {
 fn observe(_plan: &LogicalPlan, _rule: &dyn OptimizerRule) {}
 
 #[pyfunction]
-pub fn optimize_plan(plan: PyLogicalPlan, context_provider: PyOptimizerContext) -> PyLogicalPlan {
+pub fn optimize_plan(
+    plan: PyLogicalPlan,
+    context_provider: PyOptimizerContext,
+) -> PyResult<PyLogicalPlan> {
     let optimizer = Optimizer::new();
     let plan = plan.plan.as_ref().clone();
     let optimized_plan = optimizer
         .optimize(plan, context_provider.context.as_ref(), observe)
-        .unwrap();
-    PyLogicalPlan::from(optimized_plan)
+        .map_err(from_datafusion_error)?;
+    Ok(PyLogicalPlan::from(optimized_plan))
 }
 
 pub(crate) fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {

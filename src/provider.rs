@@ -68,15 +68,17 @@ impl TableProvider for PyTableProvider {
         _limit: Option<usize>,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         Python::attach(|py| {
+            // Only filters supports_filters_pushdown accepted reach here, but the
+            // conversion calls into Python again and can still fail.
             let args = filters
                 .iter()
                 .map(|filter| {
                     IbisFilterExpression::try_from(filter)
-                        .unwrap()
-                        .inner()
-                        .clone_ref(py)
+                        .map(|f| f.inner().clone_ref(py))
+                        // Via PyErr so a Python exception keeps its type.
+                        .map_err(|err| to_external_err(err.into()))
                 })
-                .collect::<Vec<Py<PyAny>>>();
+                .collect::<datafusion_common::Result<Vec<Py<PyAny>>>>()?;
             let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
             let kwargs = [("filters", ibis_filters)]
                 .into_py_dict(py)

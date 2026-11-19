@@ -1,10 +1,12 @@
 use pyo3::{prelude::*, types::PyTuple};
 
 use crate::errors::to_external_err;
+use crate::pyarrow_util::arrays_to_pyarrow;
 use crate::utils::{make_scalar_function, parse_volatility};
-use datafusion::arrow::array::{make_array, Array, ArrayData, ArrayRef};
+use datafusion::arrow::array::{make_array, ArrayData, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType, ToPyArrow};
+use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType};
+use datafusion::common::exec_err;
 use datafusion::error::DataFusionError;
 use datafusion_expr::create_udf;
 use datafusion_expr::function::ScalarFunctionImplementation;
@@ -13,22 +15,29 @@ use datafusion_expr::ScalarUDF;
 /// Create a DataFusion's UDF implementation from a python function
 /// that expects pyarrow arrays. This is more efficient as it performs
 /// a zero-copy of the contents.
-fn to_rust_function(func: Py<PyAny>) -> ScalarFunctionImplementation {
+fn to_rust_function(func: Py<PyAny>, return_type: DataType) -> ScalarFunctionImplementation {
     make_scalar_function(
         move |args: &[ArrayRef]| -> Result<ArrayRef, DataFusionError> {
             Python::attach(|py| {
                 // 1. cast args to Pyarrow arrays
-                let py_args = args
-                    .iter()
-                    .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
-                    .collect::<Vec<_>>();
+                let py_args = arrays_to_pyarrow(args, py).map_err(to_external_err)?;
                 let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
                 // 2. call function
                 let value = func.call(py, py_args, None).map_err(to_external_err)?;
 
                 // 3. cast to arrow::array::Array
-                let array_data = ArrayData::from_pyarrow_bound(value.bind(py)).unwrap();
+                let array_data =
+                    ArrayData::from_pyarrow_bound(value.bind(py)).map_err(to_external_err)?;
+                // Nothing downstream checks the type against the declared one, and
+                // kernels that downcast (e.g. sum) panic on a mismatch.
+                if !array_data.data_type().equals_datatype(&return_type) {
+                    return exec_err!(
+                        "Python UDF returned an array of type {}, expected {}",
+                        array_data.data_type(),
+                        return_type
+                    );
+                }
                 Ok(make_array(array_data))
             })
         },
@@ -55,9 +64,9 @@ impl PyScalarUDF {
         let function = create_udf(
             name,
             input_types.0,
-            return_type.0,
+            return_type.0.clone(),
             parse_volatility(volatility)?,
-            to_rust_function(func),
+            to_rust_function(func, return_type.0),
         );
         Ok(Self { function })
     }

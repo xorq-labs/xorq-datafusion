@@ -82,21 +82,20 @@ impl TableProvider for IbisTable {
                     .iter()
                     .map(|filter| {
                         IbisFilterExpression::try_from(filter)
-                            .unwrap()
-                            .inner()
-                            .clone_ref(py)
+                            .map(|f| f.inner().clone_ref(py))
+                            .map_err(|err| to_external_err(err.into()))
                     })
-                    .collect::<Vec<Py<PyAny>>>();
+                    .collect::<datafusion_common::Result<Vec<Py<PyAny>>>>()?;
                 let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
                 self.ibis_table
                     .call_method1(py, "filter", ibis_filters)
                     .map_err(to_external_err)?
                     .call_method0(py, "to_pyarrow_batches")
-                    .unwrap()
+                    .map_err(to_external_err)?
             } else {
                 self.ibis_table
                     .call_method0(py, "to_pyarrow_batches")
-                    .unwrap()
+                    .map_err(to_external_err)?
             };
 
             let plan: Arc<dyn ExecutionPlan> = Arc::new(

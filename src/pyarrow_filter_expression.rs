@@ -150,11 +150,11 @@ impl TryFrom<&Expr> for PyArrowFilterExpression {
                         .0
                         .bind(py)
                         .call_method1("isin", (scalars,))
-                        .map(|ret| {
+                        .and_then(|ret| {
                             if *negated {
-                                invert.call1((ret,)).unwrap()
+                                invert.call1((ret,))
                             } else {
-                                ret
+                                Ok(ret)
                             }
                         })
                         .map_err(DataFusionError::from)

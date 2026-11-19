@@ -5,6 +5,7 @@ use pyo3::{prelude::*, types::PyTuple};
 use crate::common::data_type::PyScalarValue;
 use crate::errors::to_external_err;
 use crate::expr::PyExpr;
+use crate::pyarrow_util::arrays_to_pyarrow;
 use crate::utils::parse_volatility;
 use datafusion::arrow::array::{Array, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
@@ -28,10 +29,7 @@ impl Accumulator for RustAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         Python::attach(|py| {
             // 1. cast args to Pyarrow array
-            let py_args = values
-                .iter()
-                .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
-                .collect::<Vec<_>>();
+            let py_args = arrays_to_pyarrow(values, py).map_err(to_external_err)?;
             let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
             // 2. call function
@@ -86,10 +84,7 @@ impl Accumulator for RustAccumulator {
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         Python::attach(|py| {
             // 1. cast args to Pyarrow array
-            let py_args = values
-                .iter()
-                .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
-                .collect::<Vec<_>>();
+            let py_args = arrays_to_pyarrow(values, py).map_err(to_external_err)?;
             let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
             // 2. call function
