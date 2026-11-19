@@ -72,8 +72,8 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                         )));
                     }
 
-                    let start: usize = tuple.get_item(0).unwrap().extract()?;
-                    let end: usize = tuple.get_item(1).unwrap().extract()?;
+                    let start: usize = tuple.get_item(0)?.extract()?;
+                    let end: usize = tuple.get_item(1)?.extract()?;
 
                     Ok(Range { start, end })
                 })
@@ -93,34 +93,29 @@ impl PartitionEvaluator for RustPartitionEvaluator {
 
     fn evaluate_all(&mut self, values: &[ArrayRef], num_rows: usize) -> Result<ArrayRef> {
         Python::attach(|py| {
-            let py_values = PyList::new(
-                py,
-                values
-                    .iter()
-                    .map(|arg| arg.into_data().to_pyarrow(py).unwrap()),
-            )?;
+            let py_values = values
+                .iter()
+                .map(|arg| arg.into_data().to_pyarrow(py))
+                .collect::<PyResult<Vec<_>>>()?;
+            let py_values = PyList::new(py, py_values)?;
             let py_num_rows = num_rows.into_pyobject(py)?;
             let py_args = PyTuple::new(py, vec![py_values.as_any(), &py_num_rows])?;
 
             self.evaluator
                 .bind(py)
                 .call_method1("evaluate_all", py_args)
-                .map(|v| {
-                    let array_data = ArrayData::from_pyarrow_bound(&v).unwrap();
-                    make_array(array_data)
-                })
+                .and_then(|v| Ok(make_array(ArrayData::from_pyarrow_bound(&v)?)))
         })
         .map_err(to_external_err)
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
         Python::attach(|py| {
-            let py_values = PyList::new(
-                py,
-                values
-                    .iter()
-                    .map(|arg| arg.into_data().to_pyarrow(py).unwrap()),
-            )?;
+            let py_values = values
+                .iter()
+                .map(|arg| arg.into_data().to_pyarrow(py))
+                .collect::<PyResult<Vec<_>>>()?;
+            let py_values = PyList::new(py, py_values)?;
             let range_tuple = PyTuple::new(py, vec![range.start, range.end])?;
             let py_args = PyTuple::new(py, vec![py_values.as_any(), range_tuple.as_any()])?;
 
@@ -156,10 +151,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
             self.evaluator
                 .bind(py)
                 .call_method1("evaluate_all_with_rank", py_args)
-                .map(|v| {
-                    let array_data = ArrayData::from_pyarrow_bound(&v).unwrap();
-                    make_array(array_data)
-                })
+                .and_then(|v| Ok(make_array(ArrayData::from_pyarrow_bound(&v)?)))
         })
         .map_err(to_external_err)
     }

@@ -20,15 +20,17 @@ fn to_rust_function(func: Py<PyAny>) -> ScalarFunctionImplementation {
                 // 1. cast args to Pyarrow arrays
                 let py_args = args
                     .iter()
-                    .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
-                    .collect::<Vec<_>>();
+                    .map(|arg| arg.into_data().to_pyarrow(py))
+                    .collect::<PyResult<Vec<_>>>()
+                    .map_err(to_external_err)?;
                 let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
                 // 2. call function
                 let value = func.call(py, py_args, None).map_err(to_external_err)?;
 
                 // 3. cast to arrow::array::Array
-                let array_data = ArrayData::from_pyarrow_bound(value.bind(py)).unwrap();
+                let array_data =
+                    ArrayData::from_pyarrow_bound(value.bind(py)).map_err(to_external_err)?;
                 Ok(make_array(array_data))
             })
         },

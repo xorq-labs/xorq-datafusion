@@ -30,8 +30,9 @@ impl Accumulator for RustAccumulator {
             // 1. cast args to Pyarrow array
             let py_args = values
                 .iter()
-                .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
-                .collect::<Vec<_>>();
+                .map(|arg| arg.into_data().to_pyarrow(py))
+                .collect::<PyResult<Vec<_>>>()
+                .map_err(to_external_err)?;
             let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
             // 2. call function
@@ -88,8 +89,9 @@ impl Accumulator for RustAccumulator {
             // 1. cast args to Pyarrow array
             let py_args = values
                 .iter()
-                .map(|arg| arg.into_data().to_pyarrow(py).unwrap())
-                .collect::<Vec<_>>();
+                .map(|arg| arg.into_data().to_pyarrow(py))
+                .collect::<PyResult<Vec<_>>>()
+                .map_err(to_external_err)?;
             let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
 
             // 2. call function
