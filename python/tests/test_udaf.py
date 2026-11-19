@@ -4,7 +4,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
-from xorq_datafusion import Accumulator, udaf
+from xorq_datafusion import Accumulator, SessionConfig, SessionContext, udaf
 
 
 class Summarize(Accumulator):
@@ -21,10 +21,11 @@ class Summarize(Accumulator):
         # This breaks on `None`
         self._sum = pa.scalar(self._sum.as_py() + pc.sum(values).as_py())
 
-    def merge(self, states: list[pa.Array]) -> None:
+    def merge(self, states: pa.Array) -> None:
+        # One array holding every partial state for this group.
         # Not nice since pyarrow scalars can't be summed yet.
         # This breaks on `None`
-        self._sum = pa.scalar(self._sum.as_py() + pc.sum(states[0]).as_py())
+        self._sum = pa.scalar(self._sum.as_py() + pc.sum(states).as_py())
 
     def evaluate(self) -> pa.Scalar:
         return self._sum
@@ -101,3 +102,36 @@ def test_register_udaf(ctx_with_table) -> None:
     df_result = ctx_with_table.sql("select summarize(b) from test_table")
 
     assert df_result.collect()[0][0][0].as_py() == 14.0
+
+
+def test_group_by_merges_every_partial_state():
+    """merge() gets one array with a partial state per input partition."""
+    ctx = SessionContext(
+        config=SessionConfig().with_target_partitions(4).with_batch_size(64)
+    )
+    xs = list(range(1_000))
+    batches = [
+        pa.RecordBatch.from_arrays(
+            [pa.array(xs[s : s + 50]), pa.array([x % 3 for x in xs[s : s + 50]])],
+            names=["a", "b"],
+        )
+        for s in range(0, len(xs), 50)
+    ]
+    ctx.register_record_batches("t", [batches])
+    ctx.register_udaf(
+        udaf(
+            Summarize,
+            [pa.float64()],
+            pa.float64(),
+            [pa.float64()],
+            volatility="immutable",
+        )
+    )
+
+    result = ctx.sql("select b, summarize(a) as s from t group by b order by b")
+    got = {
+        b: s
+        for rb in result.collect()
+        for b, s in zip(rb.column(0).to_pylist(), rb.column(1).to_pylist(), strict=True)
+    }
+    assert got == {k: float(sum(x for x in xs if x % 3 == k)) for k in range(3)}

@@ -26,10 +26,11 @@ class ErrorSummarize(Accumulator):
         # This breaks on `None`
         self._sum = pa.scalar(self._sum.as_py() + pc.sum(values).as_py())
 
-    def merge(self, states: list[pa.Array]) -> None:
+    def merge(self, states: pa.Array) -> None:
+        # One array holding every partial state for this group.
         # Not nice since pyarrow scalars can't be summed yet.
         # This breaks on `None`
-        self._sum = pa.scalar(self._sum.as_py() + pc.sum(states[0]).as_py())
+        self._sum = pa.scalar(self._sum.as_py() + pc.sum(states).as_py())
 
     def evaluate(self) -> pa.Scalar:
         raise Exception
