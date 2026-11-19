@@ -111,3 +111,73 @@ def test_optimizer_rule_returning_non_plan_raises():
     with pytest.raises(Exception, match="LogicalPlan") as excinfo:
         ctx.sql("select a from t").collect()
     _assert_plain_error(excinfo)
+
+
+_WINDOW_FLAGS = [
+    "is_causal",
+    "supports_bounded_execution",
+    "uses_window_frame",
+    "include_rank",
+]
+
+
+class _RankEvaluator(WindowEvaluator):
+    """Dense rank via evaluate_all_with_rank: only reached when include_rank()."""
+
+    def include_rank(self):
+        return True
+
+    def evaluate_all_with_rank(self, num_rows, ranks_in_partition):
+        return pa.array(
+            [
+                rank
+                for rank, (start, end) in enumerate(ranks_in_partition, start=1)
+                for _ in range(start, end)
+            ],
+            pa.int64(),
+        )
+
+
+def _raising_flag(flag):
+    def raise_(self):
+        raise ValueError(f"{flag} exploded")
+
+    return type(f"Raising_{flag}", (_RankEvaluator,), {flag: raise_})()
+
+
+def _register_rank(ctx, evaluator):
+    ctx.register_udwf(
+        udwf(evaluator, [pa.int64()], pa.int64(), volatility="immutable", name="rnk")
+    )
+
+
+@pytest.fixture
+def ctx_ranked(ctx):
+    ctx.register_record_batches(
+        "r", [[pa.RecordBatch.from_arrays([pa.array([1, 1, 2, 3])], names=["a"])]]
+    )
+    return ctx
+
+
+def test_udwf_flags_are_used(ctx_ranked):
+    _register_rank(ctx_ranked, _RankEvaluator())
+    rb = ctx_ranked.sql("select rnk(a) over (order by a) as k from r order by a")
+    assert rb.to_arrow_table().column("k").to_pylist() == [1, 1, 2, 3]
+
+
+@pytest.mark.parametrize("flag", _WINDOW_FLAGS)
+def test_udwf_flag_raising_fails_the_query(ctx_ranked, flag):
+    # These used to be read with unwrap_or(false): the exception was dropped and
+    # the window ran as if the flag were False.
+    _register_rank(ctx_ranked, _raising_flag(flag))
+    with pytest.raises(Exception, match=f"{flag} exploded") as excinfo:
+        ctx_ranked.sql("select rnk(a) over (order by a) from r").collect()
+    _assert_plain_error(excinfo)
+
+
+def test_udwf_flag_returning_non_bool_fails_the_query(ctx_ranked):
+    evaluator = type("NonBool", (_RankEvaluator,), {"include_rank": lambda self: "yes"})
+    _register_rank(ctx_ranked, evaluator())
+    with pytest.raises(Exception, match="bool") as excinfo:
+        ctx_ranked.sql("select rnk(a) over (order by a) from r").collect()
+    _assert_plain_error(excinfo)
