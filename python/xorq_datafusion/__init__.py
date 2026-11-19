@@ -41,16 +41,22 @@ def close(timeout_secs=None, pull_timeout_secs=2.0):
     """
     Shut down the background runtime, waiting up to ``timeout_secs``.
 
-    Runs at interpreter exit. Before the runtime goes, reader threads are
-    stopped from calling into Python, and those already inside a Python
-    reader get up to ``pull_timeout_secs`` to return: one still inside when
-    the interpreter finalizes would crash the process. ``None`` skips that
-    wait; ``float("inf")`` waits without limit.
+    Runs at interpreter exit. Before the runtime goes, reader threads and
+    Python callbacks (UDF, UDAF and UDWF calls, table provider scans and
+    filter pushdown, optimizer rules) are stopped from calling into Python,
+    and those already inside get up to ``pull_timeout_secs`` to return: one
+    still inside when the interpreter finalizes would crash the process, so a
+    slow callback can delay exit by up to that long. ``None`` skips that wait;
+    ``float("inf")`` waits without limit.
+
+    After ``close()``, any query that reads a Python-backed table or calls a
+    Python callback fails.
 
     Returns
     -------
     bool
-        ``False`` when some reader was still running at that deadline.
+        ``False`` when some reader or callback was still running at that
+        deadline.
 
     """
     return _runtime.shutdown(timeout_secs, pull_timeout_secs)

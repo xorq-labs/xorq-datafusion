@@ -25,10 +25,9 @@ use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::common::data_type::PyScalarValue;
-use crate::errors::to_external_err;
 use crate::expr::PyExpr;
 use crate::pyarrow_util::arrays_to_pyarrow;
-use crate::utils::parse_volatility;
+use crate::utils::{parse_volatility, with_python};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType};
 use datafusion::error::Result;
@@ -76,12 +75,13 @@ fn read_flag(evaluator: &Bound<'_, PyAny>, name: &str) -> PyResult<bool> {
 
 impl PartitionEvaluator for RustPartitionEvaluator {
     fn memoize(&mut self, _state: &mut WindowAggState) -> Result<()> {
-        Python::attach(|py| self.evaluator.bind(py).call_method0("memoize").map(|_| ()))
-            .map_err(to_external_err)
+        with_python("UDWF memoize", |py| {
+            self.evaluator.bind(py).call_method0("memoize").map(|_| ())
+        })
     }
 
     fn get_range(&self, idx: usize, n_rows: usize) -> Result<Range<usize>> {
-        Python::attach(|py| {
+        with_python("UDWF get_range", |py| {
             let py_args = vec![idx.into_pyobject(py)?, n_rows.into_pyobject(py)?];
             let py_args = PyTuple::new(py, py_args)?;
 
@@ -103,7 +103,6 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                     Ok(Range { start, end })
                 })
         })
-        .map_err(to_external_err)
     }
 
     fn is_causal(&self) -> bool {
@@ -111,7 +110,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
     }
 
     fn evaluate_all(&mut self, values: &[ArrayRef], num_rows: usize) -> Result<ArrayRef> {
-        Python::attach(|py| {
+        with_python("UDWF evaluate_all", |py| {
             let py_values = PyList::new(py, arrays_to_pyarrow(values, py)?)?;
             let py_num_rows = num_rows.into_pyobject(py)?;
             let py_args = PyTuple::new(py, vec![py_values.as_any(), &py_num_rows])?;
@@ -121,11 +120,10 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                 .call_method1("evaluate_all", py_args)
                 .and_then(|v| Ok(make_array(ArrayData::from_pyarrow_bound(&v)?)))
         })
-        .map_err(to_external_err)
     }
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
-        Python::attach(|py| {
+        with_python("UDWF evaluate", |py| {
             let py_values = PyList::new(py, arrays_to_pyarrow(values, py)?)?;
             let range_tuple = PyTuple::new(py, vec![range.start, range.end])?;
             let py_args = PyTuple::new(py, vec![py_values.as_any(), range_tuple.as_any()])?;
@@ -136,7 +134,6 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                 .and_then(|v| v.extract::<PyScalarValue>())
                 .map(|v| v.0)
         })
-        .map_err(to_external_err)
     }
 
     fn evaluate_all_with_rank(
@@ -144,7 +141,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
         num_rows: usize,
         ranks_in_partition: &[Range<usize>],
     ) -> Result<ArrayRef> {
-        Python::attach(|py| {
+        with_python("UDWF evaluate_all_with_rank", |py| {
             let ranks = ranks_in_partition
                 .iter()
                 .map(|r| PyTuple::new(py, vec![r.start, r.end]))
@@ -164,7 +161,6 @@ impl PartitionEvaluator for RustPartitionEvaluator {
                 .call_method1("evaluate_all_with_rank", py_args)
                 .and_then(|v| Ok(make_array(ArrayData::from_pyarrow_bound(&v)?)))
         })
-        .map_err(to_external_err)
     }
 
     fn supports_bounded_execution(&self) -> bool {
@@ -247,11 +243,10 @@ impl EvaluatorSource {
 
 fn to_rust_partition_evaluator(source: EvaluatorSource) -> PartitionEvaluatorFactory {
     Arc::new(move || -> Result<Box<dyn PartitionEvaluator>> {
-        let evaluator = Python::attach(|py| {
+        let evaluator = with_python("UDWF evaluator factory", |py| {
             let evaluator = source.create(py)?;
             RustPartitionEvaluator::new(py, evaluator)
-        })
-        .map_err(to_external_err)?;
+        })?;
         Ok(Box::new(evaluator))
     })
 }

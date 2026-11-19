@@ -6,15 +6,14 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use pyo3::types::{IntoPyDict, PyAnyMethods, PyTuple};
-use pyo3::{pyclass, pymethods, PyAny, PyResult, Python};
+use pyo3::{pyclass, pymethods, PyAny, PyResult};
 
 use crate::ibis_filter_expression::IbisFilterExpression;
 use crate::ibis_table_exec::IbisTableExec;
 
-use crate::errors::to_external_err;
+use crate::utils::with_python;
 use pyo3::prelude::*;
 
 #[pyclass(name = "TableProvider", module = "let", subclass)]
@@ -67,33 +66,27 @@ impl TableProvider for PyTableProvider {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        Python::attach(|py| {
+        with_python("Python TableProvider.scan", |py| -> PyResult<_> {
             // Only filters supports_filters_pushdown accepted reach here, but the
-            // conversion calls into Python again and can still fail.
+            // conversion calls into Python again and can still fail. Via PyErr so a
+            // Python exception keeps its type.
             let args = filters
                 .iter()
                 .map(|filter| {
-                    IbisFilterExpression::try_from(filter)
-                        .map(|f| f.inner().clone_ref(py))
-                        // Via PyErr so a Python exception keeps its type.
-                        .map_err(|err| to_external_err(err.into()))
+                    Ok(IbisFilterExpression::try_from(filter)?
+                        .inner()
+                        .clone_ref(py))
                 })
-                .collect::<datafusion_common::Result<Vec<Py<PyAny>>>>()?;
-            let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
-            let kwargs = [("filters", ibis_filters)]
-                .into_py_dict(py)
-                .map_err(to_external_err)?;
+                .collect::<PyResult<Vec<Py<PyAny>>>>()?;
+            let kwargs = [("filters", PyTuple::new(py, &args)?)].into_py_dict(py)?;
 
             let table = self
                 .table_provider
                 .bind(py)
-                .call_method("scan", (), Some(&kwargs))
-                .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                .call_method("scan", (), Some(&kwargs))?;
 
-            let plan: Arc<dyn ExecutionPlan> = Arc::new(
-                IbisTableExec::new(py, &table, projection)
-                    .map_err(|err| DataFusionError::External(Box::new(err)))?,
-            );
+            let plan: Arc<dyn ExecutionPlan> =
+                Arc::new(IbisTableExec::new(py, &table, projection)?);
             Ok(plan)
         })
     }
@@ -102,12 +95,15 @@ impl TableProvider for PyTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion_common::Result<Vec<TableProviderFilterPushDown>> {
-        filters
-            .iter()
-            .map(|&filter| match IbisFilterExpression::try_from(filter) {
-                Ok(_) => Ok(TableProviderFilterPushDown::Exact),
-                _ => Ok(TableProviderFilterPushDown::Unsupported),
-            })
-            .collect()
+        // The conversion calls into Python.
+        with_python("Python TableProvider filter pushdown", |_py| {
+            filters
+                .iter()
+                .map(|&filter| match IbisFilterExpression::try_from(filter) {
+                    Ok(_) => Ok(TableProviderFilterPushDown::Exact),
+                    _ => Ok(TableProviderFilterPushDown::Unsupported),
+                })
+                .collect::<datafusion_common::Result<Vec<_>>>()
+        })
     }
 }

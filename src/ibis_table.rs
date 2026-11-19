@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use datafusion::catalog::Session;
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::PyModule;
@@ -16,7 +15,7 @@ use pyo3::{PyAny, PyResult, Python};
 use crate::ibis_filter_expression::IbisFilterExpression;
 use crate::ibis_table_exec::IbisTableExec;
 
-use crate::errors::to_external_err;
+use crate::utils::with_python;
 use pyo3::prelude::*;
 
 // Wraps an ibis.Table class and implements a Datafusion TableProvider around it
@@ -76,32 +75,25 @@ impl TableProvider for IbisTable {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        Python::attach(|py| {
+        with_python("ibis table scan", |py| -> PyResult<_> {
             let table = if !filters.is_empty() {
                 let args = filters
                     .iter()
                     .map(|filter| {
-                        IbisFilterExpression::try_from(filter)
-                            .map(|f| f.inner().clone_ref(py))
-                            .map_err(|err| to_external_err(err.into()))
+                        Ok(IbisFilterExpression::try_from(filter)?
+                            .inner()
+                            .clone_ref(py))
                     })
-                    .collect::<datafusion_common::Result<Vec<Py<PyAny>>>>()?;
-                let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
+                    .collect::<PyResult<Vec<Py<PyAny>>>>()?;
                 self.ibis_table
-                    .call_method1(py, "filter", ibis_filters)
-                    .map_err(to_external_err)?
-                    .call_method0(py, "to_pyarrow_batches")
-                    .map_err(to_external_err)?
+                    .call_method1(py, "filter", PyTuple::new(py, &args)?)?
+                    .call_method0(py, "to_pyarrow_batches")?
             } else {
-                self.ibis_table
-                    .call_method0(py, "to_pyarrow_batches")
-                    .map_err(to_external_err)?
+                self.ibis_table.call_method0(py, "to_pyarrow_batches")?
             };
 
-            let plan: Arc<dyn ExecutionPlan> = Arc::new(
-                IbisTableExec::new(py, table.bind(py), projection)
-                    .map_err(|err| DataFusionError::External(Box::new(err)))?,
-            );
+            let plan: Arc<dyn ExecutionPlan> =
+                Arc::new(IbisTableExec::new(py, table.bind(py), projection)?);
             Ok(plan)
         })
     }
@@ -110,12 +102,15 @@ impl TableProvider for IbisTable {
         &self,
         filters: &[&Expr],
     ) -> datafusion_common::Result<Vec<TableProviderFilterPushDown>> {
-        filters
-            .iter()
-            .map(|&f| match IbisFilterExpression::try_from(f) {
-                Ok(_) => Ok(TableProviderFilterPushDown::Exact),
-                _ => Ok(TableProviderFilterPushDown::Unsupported),
-            })
-            .collect()
+        // The conversion calls into Python.
+        with_python("ibis table filter pushdown", |_py| {
+            filters
+                .iter()
+                .map(|&f| match IbisFilterExpression::try_from(f) {
+                    Ok(_) => Ok(TableProviderFilterPushDown::Exact),
+                    _ => Ok(TableProviderFilterPushDown::Unsupported),
+                })
+                .collect::<datafusion_common::Result<Vec<_>>>()
+        })
     }
 }

@@ -40,15 +40,16 @@ struct TokioRuntime;
 
 #[pymethods]
 impl TokioRuntime {
-    /// Stop pull threads from entering Python, wait up to `pull_timeout_secs`
-    /// for the ones already inside to return, then shut the runtime down
-    /// (waiting up to `timeout_secs`). For both, `None` means do not wait;
-    /// `pull_timeout_secs` also takes `inf` for no limit. The default lives in
-    /// the Python `close()`.
+    /// Stop pull threads and Python callbacks (UDF, UDAF and UDWF calls, table
+    /// provider scans and filter pushdown, optimizer rules) from entering
+    /// Python, wait up to `pull_timeout_secs` for the ones already inside to
+    /// return, then shut the runtime down (waiting up to `timeout_secs`). For
+    /// both, `None` means do not wait; `pull_timeout_secs` also takes `inf` for
+    /// no limit. The default lives in the Python `close()`.
     ///
-    /// Returns `False` when some pull was still inside Python at the deadline.
-    /// Every later scan of a Python-backed table fails: this is meant for
-    /// interpreter exit.
+    /// Returns `False` when some pull or callback was still inside Python at
+    /// the deadline. Every later query that reads a Python-backed table or calls
+    /// a Python callback fails: this is meant for interpreter exit.
     #[pyo3(signature = (timeout_secs=None, pull_timeout_secs=None))]
     fn shutdown(
         &self,

@@ -1,8 +1,7 @@
 use pyo3::{prelude::*, types::PyTuple};
 
-use crate::errors::to_external_err;
 use crate::pyarrow_util::arrays_to_pyarrow;
-use crate::utils::{make_scalar_function, parse_volatility};
+use crate::utils::{make_scalar_function, parse_volatility, with_python};
 use datafusion::arrow::array::{make_array, ArrayData, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType};
@@ -18,28 +17,26 @@ use datafusion_expr::ScalarUDF;
 fn to_rust_function(func: Py<PyAny>, return_type: DataType) -> ScalarFunctionImplementation {
     make_scalar_function(
         move |args: &[ArrayRef]| -> Result<ArrayRef, DataFusionError> {
-            Python::attach(|py| {
+            let array_data = with_python("Python UDF", |py| {
                 // 1. cast args to Pyarrow arrays
-                let py_args = arrays_to_pyarrow(args, py).map_err(to_external_err)?;
-                let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
+                let py_args = PyTuple::new(py, arrays_to_pyarrow(args, py)?)?;
 
                 // 2. call function
-                let value = func.call(py, py_args, None).map_err(to_external_err)?;
+                let value = func.call(py, py_args, None)?;
 
                 // 3. cast to arrow::array::Array
-                let array_data =
-                    ArrayData::from_pyarrow_bound(value.bind(py)).map_err(to_external_err)?;
-                // Nothing downstream checks the type against the declared one, and
-                // kernels that downcast (e.g. sum) panic on a mismatch.
-                if !array_data.data_type().equals_datatype(&return_type) {
-                    return exec_err!(
-                        "Python UDF returned an array of type {}, expected {}",
-                        array_data.data_type(),
-                        return_type
-                    );
-                }
-                Ok(make_array(array_data))
-            })
+                ArrayData::from_pyarrow_bound(value.bind(py))
+            })?;
+            // Nothing downstream checks the type against the declared one, and
+            // kernels that downcast (e.g. sum) panic on a mismatch.
+            if !array_data.data_type().equals_datatype(&return_type) {
+                return exec_err!(
+                    "Python UDF returned an array of type {}, expected {}",
+                    array_data.data_type(),
+                    return_type
+                );
+            }
+            Ok(make_array(array_data))
         },
     )
 }

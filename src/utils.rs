@@ -100,7 +100,8 @@ fn try_speculate(read_ahead: ReadAhead) -> Option<Credit> {
 ///   runs on drop (a generator's `finally`) does not run.
 pub type BatchPull = Box<dyn FnMut() -> Option<Result<RecordBatch>> + Send>;
 
-/// Keeps pull threads out of Python once the interpreter starts shutting down.
+/// Keeps pull threads and Python callbacks out of Python once the interpreter
+/// starts shutting down.
 ///
 /// Pull threads are not Python threads: nothing joins them before
 /// `Py_FinalizeEx`. One that is inside a pull when finalization starts (in
@@ -133,7 +134,8 @@ static PYTHON_GATE: PythonGate = PythonGate {
     idle: std::sync::Condvar::new(),
 };
 
-/// Permission to be inside Python on a pull thread; returned on drop.
+/// Permission to be inside Python from a thread Python does not own; returned
+/// on drop.
 struct GateTicket;
 
 impl Drop for GateTicket {
@@ -157,12 +159,116 @@ fn enter_python() -> Option<GateTicket> {
     Some(GateTicket)
 }
 
+/// The error for any Python entry refused once the gate is closed; `what`
+/// finishes the sentence.
+fn closed_error(what: std::fmt::Arguments) -> datafusion_common::DataFusionError {
+    datafusion_common::DataFusionError::Execution(format!(
+        "xorq_datafusion was closed (by `close()` or at interpreter exit); {what}"
+    ))
+}
+
 fn runtime_closed() -> datafusion_common::DataFusionError {
-    datafusion_common::DataFusionError::Execution(
-        "xorq_datafusion was closed (by `close()` or at interpreter exit); \
-         Python-backed streams stop before their next pull"
-            .to_string(),
-    )
+    closed_error(format_args!(
+        "Python-backed streams stop before their next pull"
+    ))
+}
+
+/// An error from a Python callback, as DataFusion sees it.
+pub(crate) trait IntoDataFusionError {
+    fn into_datafusion_error(self) -> datafusion_common::DataFusionError;
+}
+
+impl IntoDataFusionError for PyErr {
+    fn into_datafusion_error(self) -> datafusion_common::DataFusionError {
+        crate::errors::to_external_err(self)
+    }
+}
+
+impl IntoDataFusionError for datafusion_common::DataFusionError {
+    fn into_datafusion_error(self) -> datafusion_common::DataFusionError {
+        self
+    }
+}
+
+fn python_closed(site: &str) -> datafusion_common::DataFusionError {
+    closed_error(format_args!("{site} no longer calls into Python"))
+}
+
+/// Run `f` with the GIL, from code DataFusion may run on a thread Python does
+/// not own: a tokio worker, the blocking pool, or planning inside `block_on`.
+///
+/// Holds a ticket from the same gate as the read-ahead pulls, so `close()` (and
+/// the `atexit` hook) waits for a callback already inside Python, and once the
+/// gate is closed refuses to enter Python at all: taking the GIL on a
+/// finalizing interpreter crashes the process (see [`PythonGate`]). `site`
+/// names the caller in that error, and in the debug-build note below.
+pub(crate) fn with_python<T, E: IntoDataFusionError>(
+    site: &'static str,
+    f: impl for<'py> FnOnce(Python<'py>) -> std::result::Result<T, E>,
+) -> Result<T> {
+    let Some(_entered) = enter_python() else {
+        return Err(python_closed(site));
+    };
+    note_python_on_worker(site);
+    // The ticket outlives the GIL: it is returned only after `attach` released
+    // it, so `quiesce_python_pulls` never waits on a thread that holds the GIL.
+    Python::attach(f).map_err(IntoDataFusionError::into_datafusion_error)
+}
+
+/// Debug builds only, with `XORQ_DATAFUSION_DEBUG_GIL` set: print once per
+/// site when it takes the GIL on a tokio worker, which holds that worker for as
+/// long as the Python code runs (see xorq-labs/xorq-datafusion#46).
+#[cfg(debug_assertions)]
+fn note_python_on_worker(site: &'static str) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    if !*ENABLED.get_or_init(|| std::env::var_os("XORQ_DATAFUSION_DEBUG_GIL").is_some()) {
+        return;
+    }
+    // Some inside any task on the runtime, including under block_in_place and
+    // in spawn_blocking closures (tokio sets the id for blocking tasks too), so
+    // the pool pulls, our only blocking-pool callers, mark themselves.
+    if tokio::task::try_id().is_none() || ON_BLOCKING_POOL.get() {
+        return;
+    }
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if !seen.contains(&site) {
+        seen.push(site);
+        eprintln!("xorq_datafusion: {site} takes the GIL on a tokio worker");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn note_python_on_worker(_site: &'static str) {}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Set while a pool pull runs, so [`note_python_on_worker`] can tell the
+    /// blocking pool from an async worker.
+    static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the current blocking-pool thread for [`note_python_on_worker`] until
+/// dropped.
+struct BlockingPoolMark {
+    #[cfg(debug_assertions)]
+    previous: bool,
+}
+
+impl BlockingPoolMark {
+    fn enter() -> Self {
+        Self {
+            #[cfg(debug_assertions)]
+            previous: ON_BLOCKING_POOL.replace(true),
+        }
+    }
+}
+
+impl Drop for BlockingPoolMark {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        ON_BLOCKING_POOL.set(self.previous);
+    }
 }
 
 /// Destroy a pull, which releases the Python objects it captured -- unless the
@@ -389,6 +495,7 @@ impl PullHost {
                 let demand = Arc::clone(demand);
                 let schema = Arc::clone(schema);
                 let joined = tokio::task::spawn_blocking(move || {
+                    let _mark = BlockingPoolMark::enter();
                     let mut pull = pull;
                     let _credit = credit;
                     let ended = drain_batches(pull.get(), permit, &demand, read_ahead, &schema);
