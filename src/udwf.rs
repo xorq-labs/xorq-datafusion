@@ -21,7 +21,7 @@ use std::sync::Arc;
 use arrow::array::{make_array, ArrayData, ArrayRef};
 use datafusion::logical_expr::window_state::WindowAggState;
 use datafusion::scalar::ScalarValue;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::common::data_type::PyScalarValue;
@@ -37,7 +37,7 @@ use datafusion::logical_expr::{
     PartitionEvaluator, PartitionEvaluatorFactory, Signature, Volatility, WindowUDF, WindowUDFImpl,
 };
 use datafusion_expr::function::{PartitionEvaluatorArgs, WindowUDFFieldArgs};
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple, PyType};
 
 #[derive(Debug)]
 struct RustPartitionEvaluator {
@@ -180,11 +180,78 @@ impl PartitionEvaluator for RustPartitionEvaluator {
     }
 }
 
-pub fn to_rust_partition_evaluator(evaluator: Py<PyAny>) -> PartitionEvaluatorFactory {
+/// Where each partition's Python evaluator comes from.
+///
+/// DataFusion asks for a new `PartitionEvaluator` per window partition, and
+/// evaluators keep state (`memoize`, running totals), so each partition needs
+/// its own Python object: sharing one mixes rows from different partitions.
+#[derive(Debug)]
+enum EvaluatorSource {
+    /// Called once per partition: a `WindowEvaluator` subclass, or any callable
+    /// that returns a new evaluator.
+    Factory(Py<PyAny>),
+    /// A single evaluator object; each partition gets a deep copy of it.
+    Instance(Py<PyAny>),
+}
+
+impl EvaluatorSource {
+    fn classify(evaluator: &Bound<'_, PyAny>) -> PyResult<Self> {
+        // A class is callable, and so is an evaluator instance that defines
+        // __call__; only something callable that is not itself an evaluator
+        // (it has no evaluate_all) is a factory.
+        let is_factory = evaluator.is_instance_of::<PyType>()
+            || (evaluator.is_callable() && !evaluator.hasattr("evaluate_all")?);
+        let evaluator = evaluator.clone().unbind();
+        Ok(if is_factory {
+            Self::Factory(evaluator)
+        } else {
+            Self::Instance(evaluator)
+        })
+    }
+
+    fn create(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self {
+            Self::Factory(factory) => {
+                let evaluator = factory.bind(py).call0()?;
+                // A factory returning a class or a non-evaluator would only
+                // fail later with a confusing error from a method call.
+                if evaluator.is_instance_of::<PyType>() || !evaluator.hasattr("evaluate_all")? {
+                    return Err(PyTypeError::new_err(format!(
+                        "the window evaluator factory returned {}, not a window evaluator",
+                        evaluator.repr()?
+                    )));
+                }
+                Ok(evaluator.unbind())
+            }
+            Self::Instance(evaluator) => py
+                .import("copy")?
+                .call_method1("deepcopy", (evaluator.bind(py),))
+                .map(Bound::unbind)
+                .map_err(|err| {
+                    // Only a copy that failed is the evaluator's fault: leave
+                    // KeyboardInterrupt, SystemExit and the like as they are.
+                    if !err.is_instance_of::<PyException>(py) {
+                        return err;
+                    }
+                    let wrapped = PyTypeError::new_err(format!(
+                        "could not copy the window evaluator for a new partition ({err}); \
+                         pass a factory instead, such as the evaluator class or a \
+                         function returning a new evaluator"
+                    ));
+                    wrapped.set_cause(py, Some(err));
+                    wrapped
+                }),
+        }
+    }
+}
+
+fn to_rust_partition_evaluator(source: EvaluatorSource) -> PartitionEvaluatorFactory {
     Arc::new(move || -> Result<Box<dyn PartitionEvaluator>> {
-        let evaluator =
-            Python::attach(|py| RustPartitionEvaluator::new(py, evaluator.clone_ref(py)))
-                .map_err(to_external_err)?;
+        let evaluator = Python::attach(|py| {
+            let evaluator = source.create(py)?;
+            RustPartitionEvaluator::new(py, evaluator)
+        })
+        .map_err(to_external_err)?;
         Ok(Box::new(evaluator))
     })
 }
@@ -202,7 +269,7 @@ impl PyWindowUDF {
     #[pyo3(signature=(name, evaluator, input_types, return_type, volatility))]
     fn new(
         name: &str,
-        evaluator: Py<PyAny>,
+        evaluator: &Bound<'_, PyAny>,
         input_types: Vec<PyArrowType<DataType>>,
         return_type: PyArrowType<DataType>,
         volatility: &str,
@@ -215,7 +282,7 @@ impl PyWindowUDF {
             input_types,
             return_type,
             parse_volatility(volatility)?,
-            to_rust_partition_evaluator(evaluator),
+            to_rust_partition_evaluator(EvaluatorSource::classify(evaluator)?),
         ));
         Ok(Self { function })
     }
