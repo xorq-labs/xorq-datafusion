@@ -260,6 +260,15 @@ def udwf(
     Every window partition gets its own evaluator, so state an evaluator keeps
     is never shared between partitions.
 
+    An instance is deep-copied once per ``PARTITION BY`` group. For an evaluator
+    holding large state (a model, a lookup table), choose what is copied:
+
+    - pass a factory, e.g. ``functools.partial(copy.copy, evaluator)`` for a
+      shallow copy, or ``lambda: MyEvaluator(model)`` to share ``model``;
+    - or define ``__deepcopy__`` on the evaluator to share the large state and
+      reset only the per-partition state. This also applies when the instance
+      is passed to ``WindowUDF`` directly.
+
     Args:
         func: A factory called once per partition (a ``WindowEvaluator``
             subclass, or a function returning a new evaluator), or a
@@ -279,6 +288,8 @@ def udwf(
     """
     if isinstance(func, WindowEvaluator):
         default_name = type(func).__qualname__
+    elif isinstance(func, type) and not issubclass(func, WindowEvaluator):
+        raise TypeError(f"`func` must be a WindowEvaluator subclass, not {func!r}")
     elif callable(func):
         default_name = getattr(func, "__qualname__", type(func).__qualname__)
     else:

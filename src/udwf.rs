@@ -21,7 +21,7 @@ use std::sync::Arc;
 use arrow::array::{make_array, ArrayData, ArrayRef};
 use datafusion::logical_expr::window_state::WindowAggState;
 use datafusion::scalar::ScalarValue;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyException, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::common::data_type::PyScalarValue;
@@ -211,12 +211,28 @@ impl EvaluatorSource {
 
     fn create(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self {
-            Self::Factory(factory) => factory.call0(py),
+            Self::Factory(factory) => {
+                let evaluator = factory.bind(py).call0()?;
+                // A factory returning a class or a non-evaluator would only
+                // fail later with a confusing error from a method call.
+                if evaluator.is_instance_of::<PyType>() || !evaluator.hasattr("evaluate_all")? {
+                    return Err(PyTypeError::new_err(format!(
+                        "the window evaluator factory returned {}, not a window evaluator",
+                        evaluator.repr()?
+                    )));
+                }
+                Ok(evaluator.unbind())
+            }
             Self::Instance(evaluator) => py
                 .import("copy")?
                 .call_method1("deepcopy", (evaluator.bind(py),))
                 .map(Bound::unbind)
                 .map_err(|err| {
+                    // Only a copy that failed is the evaluator's fault: leave
+                    // KeyboardInterrupt, SystemExit and the like as they are.
+                    if !err.is_instance_of::<PyException>(py) {
+                        return err;
+                    }
                     let wrapped = PyTypeError::new_err(format!(
                         "could not copy the window evaluator for a new partition ({err}); \
                          pass a factory instead, such as the evaluator class or a \

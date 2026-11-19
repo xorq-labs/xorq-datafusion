@@ -1,3 +1,5 @@
+import copy
+import functools
 import threading
 
 import numpy as np
@@ -182,3 +184,68 @@ def test_udwf_default_name(func, expected):
 def test_udwf_rejects_non_callable():
     with pytest.raises(TypeError, match="callable returning one"):
         udwf(42, [pa.int64()], pa.int64(), "immutable")
+
+
+def test_udwf_rejects_non_evaluator_class():
+    with pytest.raises(TypeError, match="WindowEvaluator subclass"):
+        udwf(int, [pa.int64()], pa.int64(), "immutable")
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        pytest.param(lambda: None, id="none"),
+        pytest.param(lambda: CallCounter, id="class"),
+    ],
+)
+def test_factory_must_return_an_evaluator(ctx_groups, factory):
+    with pytest.raises(Exception, match="not a window evaluator"):
+        _calls_per_row(ctx_groups, factory)
+
+
+def test_shallow_copy_factory(ctx_groups):
+    """The factory decides how each partition's evaluator is made."""
+    proto = CallCounter()
+    assert _calls_per_row(ctx_groups, functools.partial(copy.copy, proto)) == [1] * 6
+    assert proto.calls == 0
+
+
+class SharedModel(CallCounter):
+    """Shares ``model`` across partitions; ``calls`` is per partition."""
+
+    def __init__(self):
+        super().__init__()
+        self.model = []
+
+    def __deepcopy__(self, memo):
+        new = copy.copy(self)
+        new.calls = 0
+        return new
+
+    def evaluate_all(self, values, num_rows):
+        self.model.append(id(self))
+        return super().evaluate_all(values, num_rows)
+
+
+def test_deepcopy_hook_is_honoured(ctx_groups):
+    evaluator = SharedModel()
+    assert _calls_per_row(ctx_groups, evaluator) == [1] * 6
+    # One shared model, written to by three distinct per-partition evaluators.
+    assert len(evaluator.model) == 3
+    assert len(set(evaluator.model)) == 3
+    assert id(evaluator) not in evaluator.model
+
+
+class _Interrupt(BaseException):
+    pass
+
+
+class InterruptedCopy(CallCounter):
+    def __deepcopy__(self, memo):
+        raise _Interrupt("stop")
+
+
+def test_copy_interruption_is_not_reported_as_uncopyable(ctx_groups):
+    with pytest.raises(BaseException) as excinfo:  # noqa: PT011
+        _calls_per_row(ctx_groups, InterruptedCopy())
+    assert "pass a factory" not in str(excinfo.value)
