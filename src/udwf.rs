@@ -42,12 +42,36 @@ use pyo3::types::{PyList, PyTuple};
 #[derive(Debug)]
 struct RustPartitionEvaluator {
     evaluator: Py<PyAny>,
+    // The PartitionEvaluator flag methods return a plain bool, so an exception
+    // raised there could only be dropped. They are read once here instead,
+    // where an exception fails the query.
+    is_causal: bool,
+    supports_bounded_execution: bool,
+    uses_window_frame: bool,
+    include_rank: bool,
 }
 
 impl RustPartitionEvaluator {
-    fn new(evaluator: Py<PyAny>) -> Self {
-        Self { evaluator }
+    fn new(py: Python<'_>, evaluator: Py<PyAny>) -> PyResult<Self> {
+        let bound = evaluator.bind(py);
+        Ok(Self {
+            is_causal: read_flag(bound, "is_causal")?,
+            supports_bounded_execution: read_flag(bound, "supports_bounded_execution")?,
+            uses_window_frame: read_flag(bound, "uses_window_frame")?,
+            include_rank: read_flag(bound, "include_rank")?,
+            evaluator,
+        })
     }
+}
+
+/// Call the evaluator's `name()` flag method. A missing method means `false`
+/// (the `WindowEvaluator` default); an exception or a non-bool result is an
+/// error.
+fn read_flag(evaluator: &Bound<'_, PyAny>, name: &str) -> PyResult<bool> {
+    if !evaluator.hasattr(name)? {
+        return Ok(false);
+    }
+    evaluator.call_method0(name)?.extract()
 }
 
 impl PartitionEvaluator for RustPartitionEvaluator {
@@ -83,13 +107,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
     }
 
     fn is_causal(&self) -> bool {
-        Python::attach(|py| {
-            self.evaluator
-                .bind(py)
-                .call_method0("is_causal")
-                .and_then(|v| v.extract())
-                .unwrap_or(false)
-        })
+        self.is_causal
     }
 
     fn evaluate_all(&mut self, values: &[ArrayRef], num_rows: usize) -> Result<ArrayRef> {
@@ -150,40 +168,24 @@ impl PartitionEvaluator for RustPartitionEvaluator {
     }
 
     fn supports_bounded_execution(&self) -> bool {
-        Python::attach(|py| {
-            self.evaluator
-                .bind(py)
-                .call_method0("supports_bounded_execution")
-                .and_then(|v| v.extract())
-                .unwrap_or(false)
-        })
+        self.supports_bounded_execution
     }
 
     fn uses_window_frame(&self) -> bool {
-        Python::attach(|py| {
-            self.evaluator
-                .bind(py)
-                .call_method0("uses_window_frame")
-                .and_then(|v| v.extract())
-                .unwrap_or(false)
-        })
+        self.uses_window_frame
     }
 
     fn include_rank(&self) -> bool {
-        Python::attach(|py| {
-            self.evaluator
-                .bind(py)
-                .call_method0("include_rank")
-                .and_then(|v| v.extract())
-                .unwrap_or(false)
-        })
+        self.include_rank
     }
 }
 
 pub fn to_rust_partition_evaluator(evaluator: Py<PyAny>) -> PartitionEvaluatorFactory {
     Arc::new(move || -> Result<Box<dyn PartitionEvaluator>> {
-        let evaluator = Python::attach(|py| evaluator.clone_ref(py));
-        Ok(Box::new(RustPartitionEvaluator::new(evaluator)))
+        let evaluator =
+            Python::attach(|py| RustPartitionEvaluator::new(py, evaluator.clone_ref(py)))
+                .map_err(to_external_err)?;
+        Ok(Box::new(evaluator))
     })
 }
 
