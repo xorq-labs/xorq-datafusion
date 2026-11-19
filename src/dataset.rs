@@ -22,7 +22,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType};
-use datafusion::error::{DataFusionError, Result as DFResult};
+use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::Expr;
@@ -86,11 +86,13 @@ impl TableProvider for Dataset {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        with_python("pyarrow dataset scan", |py| -> DFResult<_> {
-            let plan: Arc<dyn ExecutionPlan> = Arc::new(
-                DatasetExec::new(py, self.dataset.bind(py), projection.cloned(), filters)
-                    .map_err(|err| DataFusionError::External(Box::new(err)))?,
-            );
+        with_python("pyarrow dataset scan", |py| -> PyResult<_> {
+            let plan: Arc<dyn ExecutionPlan> = Arc::new(DatasetExec::new(
+                py,
+                self.dataset.bind(py),
+                projection.cloned(),
+                filters,
+            )?);
             Ok(plan)
         })
     }

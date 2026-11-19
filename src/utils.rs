@@ -159,12 +159,18 @@ fn enter_python() -> Option<GateTicket> {
     Some(GateTicket)
 }
 
+/// The error for any Python entry refused once the gate is closed; `what`
+/// finishes the sentence.
+fn closed_error(what: std::fmt::Arguments) -> datafusion_common::DataFusionError {
+    datafusion_common::DataFusionError::Execution(format!(
+        "xorq_datafusion was closed (by `close()` or at interpreter exit); {what}"
+    ))
+}
+
 fn runtime_closed() -> datafusion_common::DataFusionError {
-    datafusion_common::DataFusionError::Execution(
-        "xorq_datafusion was closed (by `close()` or at interpreter exit); \
-         Python-backed streams stop before their next pull"
-            .to_string(),
-    )
+    closed_error(format_args!(
+        "Python-backed streams stop before their next pull"
+    ))
 }
 
 /// An error from a Python callback, as DataFusion sees it.
@@ -174,7 +180,7 @@ pub(crate) trait IntoDataFusionError {
 
 impl IntoDataFusionError for PyErr {
     fn into_datafusion_error(self) -> datafusion_common::DataFusionError {
-        datafusion_common::DataFusionError::External(Box::new(self))
+        crate::errors::to_external_err(self)
     }
 }
 
@@ -185,10 +191,7 @@ impl IntoDataFusionError for datafusion_common::DataFusionError {
 }
 
 fn python_closed(site: &str) -> datafusion_common::DataFusionError {
-    datafusion_common::DataFusionError::Execution(format!(
-        "xorq_datafusion was closed (by `close()` or at interpreter exit); \
-         {site} no longer calls into Python"
-    ))
+    closed_error(format_args!("{site} no longer calls into Python"))
 }
 
 /// Run `f` with the GIL, from code DataFusion may run on a thread Python does
@@ -212,20 +215,6 @@ pub(crate) fn with_python<T, E: IntoDataFusionError>(
     Python::attach(f).map_err(IntoDataFusionError::into_datafusion_error)
 }
 
-/// [`with_python`] for callbacks DataFusion gives no way to fail (they return a
-/// plain value): `closed` is returned instead once the gate is closed.
-pub(crate) fn with_python_or<T>(
-    site: &'static str,
-    closed: T,
-    f: impl for<'py> FnOnce(Python<'py>) -> T,
-) -> T {
-    let Some(_entered) = enter_python() else {
-        return closed;
-    };
-    note_python_on_worker(site);
-    Python::attach(f)
-}
-
 /// Debug builds only, with `XORQ_DATAFUSION_DEBUG_GIL` set: print once per
 /// site when it takes the GIL on a tokio worker, which holds that worker for as
 /// long as the Python code runs (see xorq-labs/xorq-datafusion#46).
@@ -236,9 +225,10 @@ fn note_python_on_worker(site: &'static str) {
     if !*ENABLED.get_or_init(|| std::env::var_os("XORQ_DATAFUSION_DEBUG_GIL").is_some()) {
         return;
     }
-    // Some only inside a task on the runtime, including under block_in_place;
-    // None on the blocking pool and on threads outside the runtime.
-    if tokio::task::try_id().is_none() {
+    // Some inside any task on the runtime, including under block_in_place and
+    // in spawn_blocking closures (tokio sets the id for blocking tasks too), so
+    // the pool pulls, our only blocking-pool callers, mark themselves.
+    if tokio::task::try_id().is_none() || ON_BLOCKING_POOL.get() {
         return;
     }
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
@@ -250,6 +240,36 @@ fn note_python_on_worker(site: &'static str) {
 
 #[cfg(not(debug_assertions))]
 fn note_python_on_worker(_site: &'static str) {}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// Set while a pool pull runs, so [`note_python_on_worker`] can tell the
+    /// blocking pool from an async worker.
+    static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the current blocking-pool thread for [`note_python_on_worker`] until
+/// dropped.
+struct BlockingPoolMark {
+    #[cfg(debug_assertions)]
+    previous: bool,
+}
+
+impl BlockingPoolMark {
+    fn enter() -> Self {
+        Self {
+            #[cfg(debug_assertions)]
+            previous: ON_BLOCKING_POOL.replace(true),
+        }
+    }
+}
+
+impl Drop for BlockingPoolMark {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        ON_BLOCKING_POOL.set(self.previous);
+    }
+}
 
 /// Destroy a pull, which releases the Python objects it captured -- unless the
 /// gate is closed, in which case the pull is leaked rather than touch an
@@ -475,6 +495,7 @@ impl PullHost {
                 let demand = Arc::clone(demand);
                 let schema = Arc::clone(schema);
                 let joined = tokio::task::spawn_blocking(move || {
+                    let _mark = BlockingPoolMark::enter();
                     let mut pull = pull;
                     let _credit = credit;
                     let ended = drain_batches(pull.get(), permit, &demand, read_ahead, &schema);

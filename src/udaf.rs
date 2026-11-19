@@ -3,10 +3,9 @@ use std::sync::Arc;
 use pyo3::{prelude::*, types::PyTuple};
 
 use crate::common::data_type::PyScalarValue;
-use crate::errors::to_external_err;
 use crate::expr::PyExpr;
 use crate::pyarrow_util::arrays_to_pyarrow;
-use crate::utils::{parse_volatility, with_python, with_python_or};
+use crate::utils::{parse_volatility, with_python};
 use datafusion::arrow::array::{Array, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{PyArrowType, ToPyArrow};
@@ -17,28 +16,35 @@ use datafusion_expr::{create_udaf, Accumulator, AccumulatorFactoryFunction, Aggr
 #[derive(Debug)]
 struct RustAccumulator {
     accum: Py<PyAny>,
+    /// Read once when the accumulator is created: DataFusion's
+    /// `supports_retract_batch` returns a plain bool, so an exception, a
+    /// non-bool, or a closed gate could not be reported there.
+    supports_retract_batch: bool,
 }
 
 impl RustAccumulator {
-    fn new(accum: Py<PyAny>) -> Self {
-        Self { accum }
+    /// A missing `supports_retract_batch` method means false.
+    fn new(accum: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let supports_retract_batch = if accum.hasattr("supports_retract_batch")? {
+            accum.call_method0("supports_retract_batch")?.extract()?
+        } else {
+            false
+        };
+        Ok(Self {
+            accum: accum.clone().unbind(),
+            supports_retract_batch,
+        })
     }
 }
 
 impl Accumulator for RustAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        with_python("UDAF update", |py| -> Result<()> {
-            // 1. cast args to Pyarrow array
-            let py_args = arrays_to_pyarrow(values, py).map_err(to_external_err)?;
-            let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
-
-            // 2. call function
+        with_python("UDAF update", |py| {
+            let py_args = PyTuple::new(py, arrays_to_pyarrow(values, py)?)?;
             self.accum
                 .bind(py)
                 .call_method1("update", py_args)
-                .map_err(to_external_err)?;
-
-            Ok(())
+                .map(|_| ())
         })
     }
 
@@ -63,52 +69,36 @@ impl Accumulator for RustAccumulator {
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        with_python("UDAF merge", |py| -> Result<()> {
-            let state = &states[0];
-
-            // 1. cast states to Pyarrow array
-            let state = state.into_data().to_pyarrow(py).map_err(to_external_err)?;
-
-            // 2. call merge
+        with_python("UDAF merge", |py| {
+            let state = states[0].to_data().to_pyarrow(py)?;
             self.accum
                 .bind(py)
                 .call_method1("merge", (state,))
-                .map_err(to_external_err)?;
-
-            Ok(())
+                .map(|_| ())
         })
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        with_python("UDAF retract_batch", |py| -> Result<()> {
-            // 1. cast args to Pyarrow array
-            let py_args = arrays_to_pyarrow(values, py).map_err(to_external_err)?;
-            let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
-
-            // 2. call function
+        with_python("UDAF retract_batch", |py| {
+            let py_args = PyTuple::new(py, arrays_to_pyarrow(values, py)?)?;
             self.accum
                 .bind(py)
                 .call_method1("retract_batch", py_args)
-                .map_err(to_external_err)?;
-
-            Ok(())
+                .map(|_| ())
         })
     }
 
     fn supports_retract_batch(&self) -> bool {
-        with_python_or("UDAF supports_retract_batch", false, |py| {
-            match self.accum.bind(py).call_method0("supports_retract_batch") {
-                Ok(x) => x.extract().unwrap_or(false),
-                Err(_) => false,
-            }
-        })
+        self.supports_retract_batch
     }
 }
 
 pub fn to_rust_accumulator(accum: Py<PyAny>) -> AccumulatorFactoryFunction {
     Arc::new(move |_| -> Result<Box<dyn Accumulator>> {
-        let accum = with_python("UDAF accumulator factory", |py| accum.call0(py))?;
-        Ok(Box::new(RustAccumulator::new(accum)))
+        let accum = with_python("UDAF accumulator factory", |py| {
+            RustAccumulator::new(accum.bind(py).call0()?.as_any())
+        })?;
+        Ok(Box::new(accum))
     })
 }
 

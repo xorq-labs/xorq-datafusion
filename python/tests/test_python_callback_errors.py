@@ -5,9 +5,18 @@ thread running the callback (often a tokio worker) instead of failing the query.
 """
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
-from xorq_datafusion import SessionContext, SessionState, WindowEvaluator, udf, udwf
+from xorq_datafusion import (
+    Accumulator,
+    SessionContext,
+    SessionState,
+    WindowEvaluator,
+    udaf,
+    udf,
+    udwf,
+)
 
 
 def _assert_plain_error(excinfo):
@@ -180,4 +189,58 @@ def test_udwf_flag_returning_non_bool_fails_the_query(ctx_ranked):
     _register_rank(ctx_ranked, evaluator())
     with pytest.raises(Exception, match="bool") as excinfo:
         ctx_ranked.sql("select rnk(a) over (order by a) from r").collect()
+    _assert_plain_error(excinfo)
+
+
+class _SlidingSum(Accumulator):
+    def __init__(self):
+        self._sum = 0
+
+    def state(self):
+        return [pa.scalar(self._sum)]
+
+    def update(self, values):
+        self._sum += pc.sum(values).as_py() or 0
+
+    def merge(self, states):
+        self._sum += pc.sum(states).as_py() or 0
+
+    def retract_batch(self, values):
+        self._sum -= pc.sum(values).as_py() or 0
+
+    def evaluate(self):
+        return pa.scalar(self._sum)
+
+    def supports_retract_batch(self):
+        return True
+
+
+_SLIDING = (
+    "select s(a) over (order by a rows between 1 preceding and current row) as k from t"
+)
+
+
+def _register_sliding(ctx, accumulator):
+    ctx.register_udaf(
+        udaf(accumulator, [pa.int64()], pa.int64(), [pa.int64()], "immutable", "s")
+    )
+
+
+def test_udaf_supports_retract_batch_is_used(ctx_table):
+    _register_sliding(ctx_table, _SlidingSum)
+    result = ctx_table.sql(_SLIDING).to_arrow_table().column("k").to_pylist()
+    assert result == [1, 3, 5]
+
+
+def test_udaf_supports_retract_batch_raising_fails_the_query(ctx_table):
+    # This used to be read as False, so the query failed with a misleading
+    # "retract_batch is not implemented" instead of the exception.
+    def raise_(self):
+        raise ValueError("supports_retract_batch exploded")
+
+    _register_sliding(
+        ctx_table, type("Raising", (_SlidingSum,), {"supports_retract_batch": raise_})
+    )
+    with pytest.raises(Exception, match="supports_retract_batch exploded") as excinfo:
+        ctx_table.sql(_SLIDING).collect()
     _assert_plain_error(excinfo)

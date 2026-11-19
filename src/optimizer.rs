@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::errors::{from_datafusion_error, to_external_err};
+use crate::errors::from_datafusion_error;
 use crate::sql::logical::PyLogicalPlan;
 use crate::utils::with_python;
 use datafusion_common::tree_node::Transformed;
@@ -60,24 +60,18 @@ impl OptimizerRule for PyOptimizerRule {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> datafusion_common::Result<Transformed<LogicalPlan>, DataFusionError> {
-        with_python(
-            "Python optimizer rule",
-            |py| -> datafusion_common::Result<_> {
-                let py_plan = PyLogicalPlan::new(plan);
-                let py_plan = self
-                    .rule
-                    .bind(py)
-                    .call_method1("try_optimize", (py_plan,))
-                    .map_err(to_external_err)?;
-                let py_plan = py_plan
-                    .extract::<PyLogicalPlan>()
-                    .map_err(|e| to_external_err(e.into()))?;
-                Ok(Transformed::new_transformed(
-                    py_plan.plan.as_ref().clone(),
-                    true,
-                ))
-            },
-        )
+        with_python("Python optimizer rule", |py| -> PyResult<_> {
+            let py_plan = self
+                .rule
+                .bind(py)
+                .call_method1("try_optimize", (PyLogicalPlan::new(plan),))?
+                .extract::<PyLogicalPlan>()
+                .map_err(PyErr::from)?;
+            Ok(Transformed::new_transformed(
+                py_plan.plan.as_ref().clone(),
+                true,
+            ))
+        })
     }
 }
 
