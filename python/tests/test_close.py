@@ -182,3 +182,77 @@ def test_close_accepts_any_pull_timeout(pull_timeout_secs, waited):
     )
     assert code == 0, err
     assert out.split() == ["2", str(waited)]
+
+
+# A Python UDF still running on a tokio worker when the interpreter exits. The
+# worker is not a Python thread, so nothing joins it before Py_Finalize; its
+# next GIL acquisition on the finalizing interpreter crashes (3.13) or hangs
+# (3.14) the process. UDF calls now go through the same gate as the pulls.
+_UDF_RUNNING_AT_EXIT = """
+    import threading, time
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import xorq_datafusion as xdf
+
+    entered = threading.Event()
+
+    def slow_plus_one(a):
+        entered.set()
+        time.sleep({delay})
+        return pc.add(a, 1)
+
+    ctx = xdf.SessionContext(
+        config=xdf.SessionConfig().with_target_partitions(2).with_batch_size(8)
+    )
+    ctx.register_record_batches(
+        "t", [[pa.record_batch({{"a": list(range(i, i + 8))}}) for i in range(0, 400, 8)]]
+    )
+    ctx.register_udf(
+        xdf.udf(slow_plus_one, [pa.int64()], pa.int64(), "immutable", "slow_plus_one")
+    )
+    outcome = []
+
+    def query():
+        try:
+            ctx.sql("select slow_plus_one(a) from t").collect()
+            outcome.append("finished")
+        except Exception as e:
+            outcome.append(str(e))
+
+    threading.Thread(target=query, daemon=True).start()
+    entered.wait()
+"""
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_exit_with_python_udf_running(attempt):
+    code, out, err = _run(_UDF_RUNNING_AT_EXIT.format(delay=0.01))
+    assert code == 0, err
+    assert "Fatal Python error" not in err
+
+
+def test_close_waits_for_a_running_udf():
+    """close() counts a UDF call already inside Python like a pull: it waits for
+    it to return (here ~0.3s) before shutting the runtime down. Afterwards the
+    query fails, either because its next UDF call is refused or because the
+    runtime cancelled it first; it never finishes."""
+    code, out, err = _run(
+        _UDF_RUNNING_AT_EXIT.format(delay=0.3)
+        + """
+    start = time.monotonic()
+    closed = xdf.close(pull_timeout_secs=5)
+    print(closed, round(time.monotonic() - start, 2))
+    deadline = time.monotonic() + 5
+    while not outcome and time.monotonic() < deadline:
+        time.sleep(0.01)
+    print(outcome)
+"""
+    )
+    assert code == 0, err
+    first, outcome = out.strip().splitlines()
+    closed, waited = first.split()
+    assert closed == "True"
+    assert float(waited) >= 0.1
+    assert outcome != "[]"
+    assert "finished" not in outcome
+    assert "no longer calls into Python" in outcome or "cancelled" in outcome, outcome

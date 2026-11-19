@@ -6,7 +6,7 @@ use crate::common::data_type::PyScalarValue;
 use crate::errors::to_external_err;
 use crate::expr::PyExpr;
 use crate::pyarrow_util::arrays_to_pyarrow;
-use crate::utils::parse_volatility;
+use crate::utils::{parse_volatility, with_python, with_python_or};
 use datafusion::arrow::array::{Array, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{PyArrowType, ToPyArrow};
@@ -27,7 +27,7 @@ impl RustAccumulator {
 
 impl Accumulator for RustAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        Python::attach(|py| {
+        with_python("UDAF update", |py| -> Result<()> {
             // 1. cast args to Pyarrow array
             let py_args = arrays_to_pyarrow(values, py).map_err(to_external_err)?;
             let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
@@ -43,11 +43,10 @@ impl Accumulator for RustAccumulator {
     }
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
-        Python::attach(|py| {
+        with_python("UDAF evaluate", |py| {
             let result = self.accum.bind(py).call_method0("evaluate")?;
             result.extract::<PyScalarValue>().map(|sv| sv.0)
         })
-        .map_err(to_external_err)
     }
 
     fn size(&self) -> usize {
@@ -55,17 +54,16 @@ impl Accumulator for RustAccumulator {
     }
 
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        Python::attach(|py| {
+        with_python("UDAF state", |py| {
             let result = self.accum.bind(py).call_method0("state")?;
             result
                 .extract::<Vec<PyScalarValue>>()
                 .map(|v| v.into_iter().map(|sv| sv.0).collect())
         })
-        .map_err(to_external_err)
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        Python::attach(|py| {
+        with_python("UDAF merge", |py| -> Result<()> {
             let state = &states[0];
 
             // 1. cast states to Pyarrow array
@@ -82,7 +80,7 @@ impl Accumulator for RustAccumulator {
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        Python::attach(|py| {
+        with_python("UDAF retract_batch", |py| -> Result<()> {
             // 1. cast args to Pyarrow array
             let py_args = arrays_to_pyarrow(values, py).map_err(to_external_err)?;
             let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;
@@ -98,18 +96,18 @@ impl Accumulator for RustAccumulator {
     }
 
     fn supports_retract_batch(&self) -> bool {
-        Python::attach(
-            |py| match self.accum.bind(py).call_method0("supports_retract_batch") {
+        with_python_or("UDAF supports_retract_batch", false, |py| {
+            match self.accum.bind(py).call_method0("supports_retract_batch") {
                 Ok(x) => x.extract().unwrap_or(false),
                 Err(_) => false,
-            },
-        )
+            }
+        })
     }
 }
 
 pub fn to_rust_accumulator(accum: Py<PyAny>) -> AccumulatorFactoryFunction {
     Arc::new(move |_| -> Result<Box<dyn Accumulator>> {
-        let accum = Python::attach(|py| accum.call0(py).map_err(to_external_err))?;
+        let accum = with_python("UDAF accumulator factory", |py| accum.call0(py))?;
         Ok(Box::new(RustAccumulator::new(accum)))
     })
 }

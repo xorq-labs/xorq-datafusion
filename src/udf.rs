@@ -2,7 +2,7 @@ use pyo3::{prelude::*, types::PyTuple};
 
 use crate::errors::to_external_err;
 use crate::pyarrow_util::arrays_to_pyarrow;
-use crate::utils::{make_scalar_function, parse_volatility};
+use crate::utils::{make_scalar_function, parse_volatility, with_python};
 use datafusion::arrow::array::{make_array, ArrayData, ArrayRef};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType};
@@ -18,7 +18,7 @@ use datafusion_expr::ScalarUDF;
 fn to_rust_function(func: Py<PyAny>, return_type: DataType) -> ScalarFunctionImplementation {
     make_scalar_function(
         move |args: &[ArrayRef]| -> Result<ArrayRef, DataFusionError> {
-            Python::attach(|py| {
+            with_python("Python UDF", |py| -> Result<ArrayRef, DataFusionError> {
                 // 1. cast args to Pyarrow arrays
                 let py_args = arrays_to_pyarrow(args, py).map_err(to_external_err)?;
                 let py_args = PyTuple::new(py, py_args).map_err(to_external_err)?;

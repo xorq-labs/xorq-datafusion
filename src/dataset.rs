@@ -34,6 +34,7 @@ use pyo3::types::PyType;
 
 use crate::dataset_exec::DatasetExec;
 use crate::pyarrow_filter_expression::PyArrowFilterExpression;
+use crate::utils::with_python;
 
 // Wraps a pyarrow.dataset.Dataset class and implements a Datafusion TableProvider around it
 #[derive(Debug)]
@@ -85,7 +86,7 @@ impl TableProvider for Dataset {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        Python::attach(|py| {
+        with_python("pyarrow dataset scan", |py| -> DFResult<_> {
             let plan: Arc<dyn ExecutionPlan> = Arc::new(
                 DatasetExec::new(py, self.dataset.bind(py), projection.cloned(), filters)
                     .map_err(|err| DataFusionError::External(Box::new(err)))?,
@@ -98,12 +99,15 @@ impl TableProvider for Dataset {
         &self,
         filters: &[&Expr],
     ) -> DFResult<Vec<TableProviderFilterPushDown>> {
-        filters
-            .iter()
-            .map(|&f| match PyArrowFilterExpression::try_from(f) {
-                Ok(_) => Ok(TableProviderFilterPushDown::Exact),
-                _ => Ok(TableProviderFilterPushDown::Unsupported),
-            })
-            .collect()
+        // The conversion calls into Python.
+        with_python("pyarrow dataset filter pushdown", |_py| {
+            filters
+                .iter()
+                .map(|&f| match PyArrowFilterExpression::try_from(f) {
+                    Ok(_) => Ok(TableProviderFilterPushDown::Exact),
+                    _ => Ok(TableProviderFilterPushDown::Unsupported),
+                })
+                .collect::<DFResult<Vec<_>>>()
+        })
     }
 }

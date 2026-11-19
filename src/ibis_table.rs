@@ -17,6 +17,7 @@ use crate::ibis_filter_expression::IbisFilterExpression;
 use crate::ibis_table_exec::IbisTableExec;
 
 use crate::errors::to_external_err;
+use crate::utils::with_python;
 use pyo3::prelude::*;
 
 // Wraps an ibis.Table class and implements a Datafusion TableProvider around it
@@ -76,7 +77,7 @@ impl TableProvider for IbisTable {
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        Python::attach(|py| {
+        with_python("ibis table scan", |py| -> datafusion_common::Result<_> {
             let table = if !filters.is_empty() {
                 let args = filters
                     .iter()
@@ -110,12 +111,15 @@ impl TableProvider for IbisTable {
         &self,
         filters: &[&Expr],
     ) -> datafusion_common::Result<Vec<TableProviderFilterPushDown>> {
-        filters
-            .iter()
-            .map(|&f| match IbisFilterExpression::try_from(f) {
-                Ok(_) => Ok(TableProviderFilterPushDown::Exact),
-                _ => Ok(TableProviderFilterPushDown::Unsupported),
-            })
-            .collect()
+        // The conversion calls into Python.
+        with_python("ibis table filter pushdown", |_py| {
+            filters
+                .iter()
+                .map(|&f| match IbisFilterExpression::try_from(f) {
+                    Ok(_) => Ok(TableProviderFilterPushDown::Exact),
+                    _ => Ok(TableProviderFilterPushDown::Unsupported),
+                })
+                .collect::<datafusion_common::Result<Vec<_>>>()
+        })
     }
 }
