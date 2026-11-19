@@ -7,6 +7,7 @@ to register user-defined scalar, aggregate and window functions.
 
 import atexit
 from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 
 import pyarrow as pa
 
@@ -247,7 +248,7 @@ def udaf(accum, input_type, return_type, state_type, volatility, name=None):
 
 
 def udwf(
-    func: WindowEvaluator,
+    func: WindowEvaluator | Callable[[], WindowEvaluator],
     input_types: pa.DataType | list[pa.DataType],
     return_type: pa.DataType,
     volatility: str,
@@ -256,8 +257,14 @@ def udwf(
     """
     Create a new User-Defined Window Function.
 
+    Every window partition gets its own evaluator, so state an evaluator keeps
+    is never shared between partitions.
+
     Args:
-        func: The python function.
+        func: A factory called once per partition (a ``WindowEvaluator``
+            subclass, or a function returning a new evaluator), or a
+            ``WindowEvaluator`` instance, which is deep-copied for each
+            partition. Pass a factory if the evaluator cannot be copied.
         input_types: The data types of the arguments to ``func``.
         return_type: The data type of the return value.
         volatility: See :py:class:`Volatility` for allowed values.
@@ -267,13 +274,17 @@ def udwf(
         A user-defined window function.
 
     Raises:
-        TypeError: If ``func`` does not implement ``WindowEvaluator``.
+        TypeError: If ``func`` is neither a ``WindowEvaluator`` nor callable.
 
     """
-    if not isinstance(func, WindowEvaluator):
-        raise TypeError("`func` must implement the abstract base class WindowEvaluator")
+    if isinstance(func, WindowEvaluator):
+        default_name = type(func).__qualname__
+    elif callable(func):
+        default_name = getattr(func, "__qualname__", type(func).__qualname__)
+    else:
+        raise TypeError("`func` must be a WindowEvaluator or a callable returning one")
     if name is None:
-        name = func.__class__.__qualname__.lower()
+        name = default_name.lower()
     if isinstance(input_types, pa.DataType):
         input_types = [input_types]
 
