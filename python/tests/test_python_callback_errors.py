@@ -12,8 +12,8 @@ from xorq_datafusion import SessionContext, SessionState, WindowEvaluator, udf, 
 
 def _assert_plain_error(excinfo):
     # pyo3 surfaces a Rust panic as PanicException, which derives from
-    # BaseException, not Exception: pytest.raises(Exception) would not catch it.
-    assert isinstance(excinfo.value, Exception)
+    # BaseException, so pytest.raises(Exception) already rejects it; this
+    # guards against a panic message re-raised as an ordinary exception.
     assert "panicked" not in str(excinfo.value)
 
 
@@ -40,6 +40,37 @@ def test_scalar_udf_returning_non_array_raises(ctx_table):
         Exception, match="Expected instance of pyarrow.lib.Array"
     ) as excinfo:
         ctx_table.sql("select not_an_array(a) from t").collect()
+    _assert_plain_error(excinfo)
+
+
+def test_scalar_udf_returning_wrong_type_raises(ctx_table):
+    wrong_type = udf(
+        lambda x: pa.array([0.5] * len(x)),
+        [pa.int64()],
+        pa.int64(),
+        volatility="immutable",
+        name="wrong_type",
+    )
+    ctx_table.register_udf(wrong_type)
+
+    # sum downcasts its input to the declared type and panicked on a mismatch.
+    with pytest.raises(Exception, match="expected Int64") as excinfo:
+        ctx_table.sql("select sum(wrong_type(a)) from t").collect()
+    _assert_plain_error(excinfo)
+
+
+def test_scalar_udf_returning_empty_array_for_scalar_args_raises(ctx_table):
+    empty = udf(
+        lambda x: pa.array([], pa.int64()),
+        [pa.int64()],
+        pa.int64(),
+        volatility="immutable",
+        name="empty",
+    )
+    ctx_table.register_udf(empty)
+
+    with pytest.raises(Exception, match="empty array") as excinfo:
+        ctx_table.sql("select empty(1)").collect()
     _assert_plain_error(excinfo)
 
 

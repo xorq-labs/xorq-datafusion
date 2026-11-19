@@ -18,7 +18,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::{make_array, Array, ArrayData, ArrayRef};
+use arrow::array::{make_array, ArrayData, ArrayRef};
 use datafusion::logical_expr::window_state::WindowAggState;
 use datafusion::scalar::ScalarValue;
 use pyo3::exceptions::PyValueError;
@@ -27,9 +27,10 @@ use pyo3::prelude::*;
 use crate::common::data_type::PyScalarValue;
 use crate::errors::to_external_err;
 use crate::expr::PyExpr;
+use crate::pyarrow_util::arrays_to_pyarrow;
 use crate::utils::parse_volatility;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType, ToPyArrow};
+use datafusion::arrow::pyarrow::{FromPyArrow, PyArrowType};
 use datafusion::error::Result;
 use datafusion::logical_expr::ptr_eq::PtrEq;
 use datafusion::logical_expr::{
@@ -93,11 +94,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
 
     fn evaluate_all(&mut self, values: &[ArrayRef], num_rows: usize) -> Result<ArrayRef> {
         Python::attach(|py| {
-            let py_values = values
-                .iter()
-                .map(|arg| arg.into_data().to_pyarrow(py))
-                .collect::<PyResult<Vec<_>>>()?;
-            let py_values = PyList::new(py, py_values)?;
+            let py_values = PyList::new(py, arrays_to_pyarrow(values, py)?)?;
             let py_num_rows = num_rows.into_pyobject(py)?;
             let py_args = PyTuple::new(py, vec![py_values.as_any(), &py_num_rows])?;
 
@@ -111,11 +108,7 @@ impl PartitionEvaluator for RustPartitionEvaluator {
 
     fn evaluate(&mut self, values: &[ArrayRef], range: &Range<usize>) -> Result<ScalarValue> {
         Python::attach(|py| {
-            let py_values = values
-                .iter()
-                .map(|arg| arg.into_data().to_pyarrow(py))
-                .collect::<PyResult<Vec<_>>>()?;
-            let py_values = PyList::new(py, py_values)?;
+            let py_values = PyList::new(py, arrays_to_pyarrow(values, py)?)?;
             let range_tuple = PyTuple::new(py, vec![range.start, range.end])?;
             let py_args = PyTuple::new(py, vec![py_values.as_any(), range_tuple.as_any()])?;
 

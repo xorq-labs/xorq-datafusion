@@ -17,7 +17,7 @@
 
 //! Conversions between PyArrow and DataFusion types
 
-use arrow::array::{Array, ArrayData};
+use arrow::array::{Array, ArrayData, ArrayRef};
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use datafusion::scalar::ScalarValue;
 use pyo3::types::{PyAnyMethods, PyList};
@@ -63,4 +63,15 @@ pub fn scalar_to_pyarrow<'py>(
     let pyscalar = pyarray.call_method1("__getitem__", (0,))?;
 
     Ok(pyscalar)
+}
+
+/// Convert arrays to pyarrow arrays through the C data interface (zero-copy).
+pub fn arrays_to_pyarrow<'py>(
+    arrays: &[ArrayRef],
+    py: Python<'py>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    arrays
+        .iter()
+        .map(|array| array.to_data().to_pyarrow(py))
+        .collect()
 }

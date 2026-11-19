@@ -75,7 +75,8 @@ impl TableProvider for PyTableProvider {
                 .map(|filter| {
                     IbisFilterExpression::try_from(filter)
                         .map(|f| f.inner().clone_ref(py))
-                        .map_err(|err| DataFusionError::External(Box::new(err)))
+                        // Via PyErr so a Python exception keeps its type.
+                        .map_err(|err| to_external_err(err.into()))
                 })
                 .collect::<datafusion_common::Result<Vec<Py<PyAny>>>>()?;
             let ibis_filters = PyTuple::new(py, &args).map_err(to_external_err)?;
