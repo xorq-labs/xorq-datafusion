@@ -167,16 +167,18 @@ def test_close_returns_true_when_pulls_finish():
 
 
 @pytest.mark.parametrize(
-    "pull_timeout_secs", ['float("inf")', 'float("nan")', "-1.0", "None"]
+    ("pull_timeout_secs", "waited"),
+    [('float("inf")', True), ('float("nan")', False), ("-1.0", False), ("None", False)],
 )
-def test_close_accepts_any_pull_timeout(pull_timeout_secs):
+def test_close_accepts_any_pull_timeout(pull_timeout_secs, waited):
     """inf waits without limit; NaN, negatives and None do not wait; none panic."""
+    # The read-ahead pull sleeps 0.5s after the query returns: only a close() that
+    # waits sees it finish. The atexit close() then waits out the rest.
     code, out, err = _run(
-        _PARKED_PULL_AT_EXIT.format(delay=0.05)
+        _PARKED_PULL_AT_EXIT.format(delay=0.5)
         + f"""
-    xdf.close(pull_timeout_secs={pull_timeout_secs})
-    print("closed")
+    print(xdf.close(pull_timeout_secs={pull_timeout_secs}))
 """
     )
     assert code == 0, err
-    assert out.split()[-1] == "closed"
+    assert out.split() == ["2", str(waited)]

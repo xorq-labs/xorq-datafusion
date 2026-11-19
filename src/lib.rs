@@ -59,8 +59,9 @@ impl TokioRuntime {
         // NaN and negatives mean no wait; too large for a Duration (inf) means no
         // limit.
         let pull_timeout = match pull_timeout_secs {
-            None => Some(std::time::Duration::ZERO),
-            Some(secs) => std::time::Duration::try_from_secs_f64(secs.max(0.0)).ok(),
+            None => std::time::Duration::ZERO,
+            Some(secs) => std::time::Duration::try_from_secs_f64(secs.max(0.0))
+                .unwrap_or(std::time::Duration::MAX),
         };
         // GIL released for both waits: an in-flight pull needs it to finish.
         py.detach(|| {

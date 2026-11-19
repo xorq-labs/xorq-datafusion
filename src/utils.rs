@@ -95,7 +95,9 @@ fn try_speculate(read_ahead: ReadAhead) -> Option<Credit> {
 /// * Under [`ReadAhead::Buffered`] it may be called for batches the query never
 ///   consumes; under [`ReadAhead::OnDemand`] it is not.
 /// * It is dropped on the blocking pool too (see [`PullGuard`]), so destroying
-///   the Python objects it owns may take the GIL.
+///   the Python objects it owns may take the GIL. Once [`quiesce_python_pulls`]
+///   has closed the gate it is leaked instead, never dropped: cleanup that only
+///   runs on drop (a generator's `finally`) does not run.
 pub type BatchPull = Box<dyn FnMut() -> Option<Result<RecordBatch>> + Send>;
 
 /// Keeps pull threads out of Python once the interpreter starts shutting down.
@@ -196,30 +198,22 @@ impl Drop for GatedPull {
     }
 }
 
-/// Close the gate and wait up to `timeout` (`None`: no limit) for every pull
-/// already inside Python to return. Returns `false` if some are still running at
-/// the deadline (a pull blocked on something that never comes); those can still
-/// take the process down at finalization, as before.
+/// Close the gate and wait up to `timeout` (`Duration::ZERO`: do not wait;
+/// `Duration::MAX`: no limit) for every pull already inside Python to return.
+/// Returns `false` if some are still running at the deadline (a pull blocked on
+/// something that never comes); those can still take the process down at
+/// finalization, as before.
 ///
 /// Must be called with the GIL released: the pulls being waited on need it to
 /// finish.
-pub fn quiesce_python_pulls(timeout: Option<std::time::Duration>) -> bool {
+pub fn quiesce_python_pulls(timeout: std::time::Duration) -> bool {
     let gate = &PYTHON_GATE;
     let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
     state.closed = true;
-    let busy = |s: &mut GateState| s.in_flight > 0;
-    let state = match timeout {
-        Some(timeout) => {
-            gate.idle
-                .wait_timeout_while(state, timeout, busy)
-                .unwrap_or_else(|e| e.into_inner())
-                .0
-        }
-        None => gate
-            .idle
-            .wait_while(state, busy)
-            .unwrap_or_else(|e| e.into_inner()),
-    };
+    let (state, _) = gate
+        .idle
+        .wait_timeout_while(state, timeout, |s| s.in_flight > 0)
+        .unwrap_or_else(|e| e.into_inner());
     state.in_flight == 0
 }
 
@@ -387,13 +381,15 @@ impl PullHost {
                 }
             }
             Self::Pool(guard) => {
-                let pull = guard.take();
+                // Gated before it is moved into the closure, so a panic out of the
+                // pull, or a closure the runtime drops unrun (a `spawn_blocking`
+                // refused during shutdown, dropped on this worker), still disposes
+                // it through the gate.
+                let pull = GatedPull(Some(guard.take()));
                 let demand = Arc::clone(demand);
                 let schema = Arc::clone(schema);
                 let joined = tokio::task::spawn_blocking(move || {
-                    // Gated from the start, so a panic out of the pull (or a
-                    // closure dropped unrun) still disposes it through the gate.
-                    let mut pull = GatedPull(Some(pull));
+                    let mut pull = pull;
                     let _credit = credit;
                     let ended = drain_batches(pull.get(), permit, &demand, read_ahead, &schema);
                     // Guarded on the way back too: if this task was aborted, the
