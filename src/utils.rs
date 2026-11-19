@@ -95,8 +95,127 @@ fn try_speculate(read_ahead: ReadAhead) -> Option<Credit> {
 /// * Under [`ReadAhead::Buffered`] it may be called for batches the query never
 ///   consumes; under [`ReadAhead::OnDemand`] it is not.
 /// * It is dropped on the blocking pool too (see [`PullGuard`]), so destroying
-///   the Python objects it owns may take the GIL.
+///   the Python objects it owns may take the GIL. Once [`quiesce_python_pulls`]
+///   has closed the gate it is leaked instead, never dropped: cleanup that only
+///   runs on drop (a generator's `finally`) does not run.
 pub type BatchPull = Box<dyn FnMut() -> Option<Result<RecordBatch>> + Send>;
+
+/// Keeps pull threads out of Python once the interpreter starts shutting down.
+///
+/// Pull threads are not Python threads: nothing joins them before
+/// `Py_FinalizeEx`. One that is inside a pull when finalization starts (in
+/// `time.sleep`, or any call that released the GIL) tries to take the GIL back
+/// on a finalizing interpreter. CPython 3.13 answers with `pthread_exit`; the
+/// forced unwind runs pyarrow's GIL guard destructor and aborts the process
+/// with "PyGILState_Release: thread state ... must be current when releasing".
+/// CPython 3.14 hangs the thread instead.
+///
+/// So every pull and every reader disposal holds a ticket from this gate, and
+/// the `atexit` hook ([`quiesce_python_pulls`]) closes it and waits, with the
+/// GIL released, for the tickets out to come back. A closed gate refuses new
+/// tickets: a stream whose next pull is refused ends with an error, and a reader
+/// whose disposal is refused is leaked -- the process is exiting.
+struct PythonGate {
+    state: std::sync::Mutex<GateState>,
+    idle: std::sync::Condvar,
+}
+
+struct GateState {
+    closed: bool,
+    in_flight: usize,
+}
+
+static PYTHON_GATE: PythonGate = PythonGate {
+    state: std::sync::Mutex::new(GateState {
+        closed: false,
+        in_flight: 0,
+    }),
+    idle: std::sync::Condvar::new(),
+};
+
+/// Permission to be inside Python on a pull thread; returned on drop.
+struct GateTicket;
+
+impl Drop for GateTicket {
+    fn drop(&mut self) {
+        let gate = &PYTHON_GATE;
+        let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.in_flight -= 1;
+        if state.in_flight == 0 {
+            gate.idle.notify_all();
+        }
+    }
+}
+
+/// A ticket, or `None` once [`quiesce_python_pulls`] has closed the gate.
+fn enter_python() -> Option<GateTicket> {
+    let mut state = PYTHON_GATE.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.closed {
+        return None;
+    }
+    state.in_flight += 1;
+    Some(GateTicket)
+}
+
+fn runtime_closed() -> datafusion_common::DataFusionError {
+    datafusion_common::DataFusionError::Execution(
+        "xorq_datafusion was closed (by `close()` or at interpreter exit); \
+         Python-backed streams stop before their next pull"
+            .to_string(),
+    )
+}
+
+/// Destroy a pull, which releases the Python objects it captured -- unless the
+/// gate is closed, in which case the pull is leaked rather than touch an
+/// interpreter that may already be finalizing.
+fn dispose_pull(pull: BatchPull) {
+    match enter_python() {
+        Some(_entered) => drop(pull),
+        None => std::mem::forget(pull),
+    }
+}
+
+/// A pull that goes through [`dispose_pull`] however it is dropped: normally,
+/// by an unwind out of the pull, or inside a closure the runtime discards
+/// without running (a `spawn_blocking` refused during shutdown).
+struct GatedPull(Option<BatchPull>);
+
+impl GatedPull {
+    fn get(&mut self) -> &mut BatchPull {
+        self.0.as_mut().expect("pull is present until into_inner")
+    }
+
+    fn into_inner(mut self) -> BatchPull {
+        self.0.take().expect("pull is present until into_inner")
+    }
+}
+
+impl Drop for GatedPull {
+    fn drop(&mut self) {
+        if let Some(pull) = self.0.take() {
+            dispose_pull(pull);
+        }
+    }
+}
+
+/// Close the gate and wait up to `timeout` (`Duration::ZERO`: do not wait;
+/// `Duration::MAX`: no limit) for every pull already inside Python to return.
+/// Returns `false` if some are still running at the deadline (a pull blocked on
+/// something that never comes); those can still take the process down at
+/// finalization, as before.
+///
+/// Must be called with the GIL released: the pulls being waited on need it to
+/// finish.
+pub fn quiesce_python_pulls(timeout: std::time::Duration) -> bool {
+    let gate = &PYTHON_GATE;
+    let mut state = gate.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.closed = true;
+    let (state, _) = gate
+        .idle
+        .wait_timeout_while(state, timeout, |s| s.in_flight > 0)
+        .unwrap_or_else(|e| e.into_inner());
+    state.in_flight == 0
+}
 
 /// Streams that may hold a dedicated pull thread at once, process-wide.
 ///
@@ -150,6 +269,10 @@ impl PullGuard {
 impl Drop for PullGuard {
     fn drop(&mut self) {
         let Some(pull) = self.0.take() else { return };
+        // Gated however the closure ends: a runtime that is shutting down drops
+        // a refused `spawn_blocking` closure on this (worker) thread unrun; the
+        // gate is closed by then, so the pull is leaked, not destroyed here.
+        let pull = GatedPull(Some(pull));
         match Handle::try_current() {
             // Detached on purpose: disposal must not depend on this task being
             // polled again -- it usually runs from a drop/abort.
@@ -258,19 +381,26 @@ impl PullHost {
                 }
             }
             Self::Pool(guard) => {
-                let pull = guard.take();
+                // Gated before it is moved into the closure, so a panic out of the
+                // pull, or a closure the runtime drops unrun (a `spawn_blocking`
+                // refused during shutdown, dropped on this worker), still disposes
+                // it through the gate.
+                let pull = GatedPull(Some(guard.take()));
                 let demand = Arc::clone(demand);
                 let schema = Arc::clone(schema);
                 let joined = tokio::task::spawn_blocking(move || {
                     let mut pull = pull;
                     let _credit = credit;
-                    let ended = drain_batches(&mut pull, permit, &demand, read_ahead, &schema);
-                    (ended, pull)
+                    let ended = drain_batches(pull.get(), permit, &demand, read_ahead, &schema);
+                    // Guarded on the way back too: if this task was aborted, the
+                    // runtime drops the output, and the pull must still be
+                    // disposed through `dispose_pull`.
+                    (ended, PullGuard::new(pull.into_inner()))
                 })
                 .await;
                 match joined {
-                    Ok((ended, returned)) => {
-                        guard.put(returned);
+                    Ok((ended, mut returned)) => {
+                        guard.put(returned.take());
                         Ok(ended)
                     }
                     // The pull panicked (the closure died with its task, so the
@@ -317,6 +447,7 @@ fn run_affine_pull(requests: std::sync::mpsc::Receiver<PullMessage>, read_ahead:
             break;
         }
     }
+    dispose_pull(pull);
 }
 
 /// Bridge a synchronous, blocking `pull` (a Python reader) to an async
@@ -510,7 +641,15 @@ fn drain_batches(
     // the speculation permits it drew.
     let mut credits: Vec<Credit> = Vec::new();
     loop {
-        match pull() {
+        // Every pull may enter Python, so it goes through the gate: once the
+        // interpreter starts shutting down, end the stream instead.
+        let Some(entered) = enter_python() else {
+            permit.send(Err(runtime_closed()));
+            return true;
+        };
+        let pulled = pull();
+        drop(entered);
+        match pulled {
             Some(Ok(batch)) => {
                 // A batch that does not match the advertised schema is terminal:
                 // downstream kernels trust the plan's schema and panic on a
