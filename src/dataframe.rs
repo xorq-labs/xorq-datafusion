@@ -323,7 +323,8 @@ impl PyDataFrame {
         ))]
     fn write_parquet(&self, path: &str, compression: &str, py: Python) -> PyResult<()> {
         let mut parquet_options = TableParquetOptions::default();
-        parquet_options.global.compression = Some(compression.to_string());
+        parquet_options.global.compression =
+            Some(compression.parse().map_err(from_datafusion_error)?);
 
         wait_for_future(
             py,

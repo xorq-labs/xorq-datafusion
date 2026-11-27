@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::ffi_stream::ArrowArrayStreamReader;
+use datafusion::arrow::ffi_stream::RecordBatchStreamReader;
 use datafusion::arrow::pyarrow::PyArrowType;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::catalog::Session;
@@ -61,7 +61,7 @@ impl TableProvider for PyRecordBatchProvider {
     async fn scan(
         &self,
         state: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -90,14 +90,14 @@ impl PartitionStream for PyArrowStreamPartition {
         // The pull runs on the blocking pool (see spawn_channel_stream). The reader
         // is acquired lazily on the first pull, and each batch is produced there,
         // so an idle/abandoned stream pins no blocking thread.
-        let mut reader: Option<ArrowArrayStreamReader> = None;
+        let mut reader: Option<RecordBatchStreamReader> = None;
         let pull: crate::utils::BatchPull = Box::new(move || {
             if reader.is_none() {
                 // Acquire the Arrow C stream reader once, on the blocking pool.
                 match Python::attach(|py| {
                     py_object
                         .bind(py)
-                        .extract::<PyArrowType<ArrowArrayStreamReader>>()
+                        .extract::<PyArrowType<RecordBatchStreamReader>>()
                         .map(|t| t.0)
                         .map_err(|e| DataFusionError::External(Box::new(e)))
                 }) {
