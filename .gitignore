@@ -75,3 +75,7 @@ docs/_build/
 /.scratch/
 # roborev snapshots
 /.roborev/
+
+# direnv per-machine layers
+.envrc.secrets
+.envrc.user
