@@ -314,7 +314,7 @@ impl PyDataFrame {
     /// Write a `DataFrame` to a Parquet file.
     /// The compression parameter sets the default parquet compression codec
     /// Valid values are: uncompressed, snappy, gzip(level),
-    /// lzo, brotli(level), lz4, zstd(level), and lz4_raw.
+    /// brotli(level), lz4, zstd(level), and lz4_raw.
     /// These values are not case sensitive. If NULL, uses
     /// default parquet writer setting
     #[pyo3(signature = (
@@ -323,7 +323,8 @@ impl PyDataFrame {
         ))]
     fn write_parquet(&self, path: &str, compression: &str, py: Python) -> PyResult<()> {
         let mut parquet_options = TableParquetOptions::default();
-        parquet_options.global.compression = Some(compression.to_string());
+        parquet_options.global.compression =
+            Some(compression.parse().map_err(from_datafusion_error)?);
 
         wait_for_future(
             py,

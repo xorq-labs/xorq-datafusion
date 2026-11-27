@@ -76,6 +76,10 @@ impl TokioRuntime {
 /// Low-level xorq internal package.
 #[pymodule]
 fn _internal(py: Python, m: Bound<'_, PyModule>) -> PyResult<()> {
+    // object_store's reqwest client is built without a bundled rustls provider
+    // (see Cargo.toml); give it ring. Err means a provider is already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     m.add_class::<TokioRuntime>()?;
     m.add("runtime", pyo3::Py::new(py, TokioRuntime {})?)?;
 

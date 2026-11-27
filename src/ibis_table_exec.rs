@@ -33,7 +33,7 @@ impl IbisTableExec {
     pub(crate) fn new(
         _py: Python,
         record_batch_reader: &Bound<'_, PyAny>,
-        projections: Option<&Vec<usize>>,
+        projections: Option<&[usize]>,
     ) -> Result<Self, DataFusionError> {
         let schema: SchemaRef = Arc::new(
             record_batch_reader
@@ -48,7 +48,7 @@ impl IbisTableExec {
         Ok(IbisTableExec {
             record_batch_reader: Arc::new(record_batch_reader.clone().unbind()),
             schema,
-            projection: projections.cloned(),
+            projection: projections.map(<[usize]>::to_vec),
             cache,
         })
     }

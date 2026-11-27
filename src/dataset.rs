@@ -82,7 +82,7 @@ impl TableProvider for Dataset {
     async fn scan(
         &self,
         _ctx: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
@@ -90,7 +90,7 @@ impl TableProvider for Dataset {
             let plan: Arc<dyn ExecutionPlan> = Arc::new(DatasetExec::new(
                 py,
                 self.dataset.bind(py),
-                projection.cloned(),
+                projection.map(<[usize]>::to_vec),
                 filters,
             )?);
             Ok(plan)

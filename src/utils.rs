@@ -347,7 +347,7 @@ fn affine_thread_budget() -> &'static Arc<Semaphore> {
 /// the blocking pool.
 ///
 /// Dropping a pull destroys the Python objects it captured (an
-/// `ArrowArrayStreamReader`'s FFI release callback, a `Py<PyIterator>`, ...),
+/// `RecordBatchStreamReader`'s FFI release callback, a `Py<PyIterator>`, ...),
 /// which acquires the GIL. That must never happen on an async worker: a worker
 /// blocked on the GIL cannot be handed back to the scheduler, and with a Python
 /// thread holding the GIL while waiting on a Rust lock (the GIL/mutex inversion)
