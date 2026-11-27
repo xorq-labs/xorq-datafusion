@@ -29,7 +29,13 @@ arrow = { version = "60.1", features = ["pyarrow"] }
 aws-config = { version = "1.8", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
 aws-credential-types = "1.2"
 aws-smithy-http-client = { version = "1.5", features = ["rustls-ring"] }
-object_store = { version = "0.14.2", features = ["aws", "gcp", "http"] }
+# The batteries-included "aws"/"gcp"/"http" features pull in aws-lc-rs for
+# both request signing and reqwest's TLS. Use the *-base features with the
+# ring signer, and reqwest without a bundled TLS provider; lib.rs installs
+# ring as the rustls process default at module init.
+object_store = { version = "0.14.2", features = ["aws-base", "gcp-base", "http-base", "ring", "reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 url = "2.5.7"
 
 # Full DWARF is not needed for the Python test loop. Line tables keep file and

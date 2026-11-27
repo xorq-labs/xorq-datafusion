@@ -314,7 +314,7 @@ impl PyDataFrame {
     /// Write a `DataFrame` to a Parquet file.
     /// The compression parameter sets the default parquet compression codec
     /// Valid values are: uncompressed, snappy, gzip(level),
-    /// lzo, brotli(level), lz4, zstd(level), and lz4_raw.
+    /// brotli(level), lz4, zstd(level), and lz4_raw.
     /// These values are not case sensitive. If NULL, uses
     /// default parquet writer setting
     #[pyo3(signature = (
